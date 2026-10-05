@@ -1,0 +1,25 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write platform/README.md
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart:
+  en: 90921a995c5a0489
+  zh: b8cfb47109afcd0e
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/why-not-patch-package-patches:
+  en: f5e62af35b9f83fe
+  zh: 2e3c305cafd8338e
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/layout:
+  en: 1ab8b509e0fe148b
+  zh: e7ed18deb4d03ba4
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage:
+  en: 11014bdcf733cd0b
+  zh: 71ff16da31eeba15
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes:
+  en: 5153d7711d920997
+  zh: ea111006b5754e04
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-one-row-wires-every-official-login:
+  en: cfc676845b524ef0
+  zh: 2e7c26e64e5b22fb
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-remaining-piece-the-model-route:
+  en: bcefa92179efb049
+  zh: 3f5d46b999249a7d
