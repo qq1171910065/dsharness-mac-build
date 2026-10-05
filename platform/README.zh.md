@@ -33,12 +33,29 @@ git merge upstream/master      # never conflicts in platform/
 
 ```text
 platform/
-  cordis.patch.yml     deployment rows: point the official login at this product
-  install.mjs          merge the above into $DSH_HOME/cordis.patch.yml
-  install.test.mjs     the merge rules (7 cases)
+  cordis.patch.yml         deployment rows: point the official login at this product
+  install.mjs              merge the above into $DSH_HOME/cordis.patch.yml
+  install.test.mjs         the merge rules (7 cases)
+  verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
 ```
+
+## 跟进上游
+
+```sh
+git fetch upstream
+git merge upstream/master
+```
+
+这就是全部更新流程，而且**永远不会冲突** —— 本 fork 自有的每个文件都在 `platform/`，上游没有这个目录。这个性质要**机械地验**而不是靠信：改错一个上游文件今天不会坏任何东西，只会坏下一次上游发布。
+
+```sh
+node platform/verify-fork-update.mjs
+node platform/verify-fork-update.mjs --no-fetch
+```
+
+它检查 `upstream` 指向官方仓、自有改动没有碰任何上游跟踪的文件、`platform/` 只存在于本 fork，并在**临时分支**上真跑一次 `git merge upstream/master`（无论走哪条路径都恢复原来的 HEAD）。工作区有未提交的改动时它拒绝运行，而不是带着脏状态去合并。
 
 ## 用法
 

@@ -33,12 +33,36 @@ This layer therefore edits no upstream file and uses three public mechanisms:
 
 ```text
 platform/
-  cordis.patch.yml     deployment rows: point the official login at this product
-  install.mjs          merge the above into $DSH_HOME/cordis.patch.yml
-  install.test.mjs     the merge rules (7 cases)
+  cordis.patch.yml         deployment rows: point the official login at this product
+  install.mjs              merge the above into $DSH_HOME/cordis.patch.yml
+  install.test.mjs         the merge rules (7 cases)
+  verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
 ```
+
+## Following upstream
+
+```sh
+git fetch upstream
+git merge upstream/master
+```
+
+That is the whole update procedure, and it can never conflict, because every
+file this fork owns lives in `platform/`, which upstream does not have. Verify
+that property mechanically rather than trusting it — an accidental edit to an
+upstream file breaks nothing today, only the next upstream release:
+
+```sh
+node platform/verify-fork-update.mjs
+node platform/verify-fork-update.mjs --no-fetch
+```
+
+It checks that `upstream` is the official repository, that no owned change
+touches an upstream-tracked file, that `platform/` exists only here, and that a
+real `git merge upstream/master` applies cleanly — on a throwaway branch, with
+the original HEAD restored on every exit path. A dirty worktree makes it refuse
+rather than merge on top of uncommitted work.
 
 ## Usage
 
