@@ -75,11 +75,27 @@ That was verified by booting the `web` profile with a home-level patch that inse
 
 The official Electron welcome window's Sign in, the Settings account page, the desktop onboarding quota page, and the `deepseek-account` model provider all reach the platform through `ctx.deepseekAccount` and talk only to `platformOrigin`. Pointing that row at this product routes all of them to the official protocol surface in `server/src/routes/dsh-account.ts`, which forwards them to the existing `/api/auth/*` endpoints.
 
-### The remaining piece: the model route
+### What is still missing: getting the per-user gateway key into the provider
 
-`llm-deepseek-account` speaks the Anthropic Messages protocol, while this product's gateway (New API) serves an OpenAI-compatible `/v1`. Models therefore have to run through `llm-pi-ai`, which `packages/bundle/base/cordis.patch.yml` already mounts dormant:
+The gateway does serve the Anthropic Messages format, so no second adapter is
+needed: this product's New API deployment answers `POST /v1/messages` as
+`RelayFormatClaude` (`relay/server/router/relay-router.go`) and accepts the
+credential as `x-api-key` (`relay/server/middleware/auth.go`, `TokenAuth`, which
+maps `x-api-key` to `Authorization: Bearer` for `/v1/messages`).
 
-- with an empty `llm-pi-ai` settings section it registers no route at all;
-- what is missing is a client plugin that on startup and on sign-in fetches `GET /api/config` and `/api/account/model-access`, then writes the `llm-pi-ai` settings section plus the `apiKeyEnv` credential reference.
+That makes the official **API-key** provider the right route: `llm-deepseek`
+(`packages/llm/llm-deepseek-api-key`) already sends `x-api-key`, and it only needs
 
-That last piece is not implemented yet.
+- `baseURL: https://ai.czmanong.com/v1` (Messages requests go to `<root>/messages`),
+- `models` naming this product's catalog,
+- `apiKeyEnv` naming the credential that holds the user's gateway key.
+
+The account provider cannot serve this route: `llm-deepseek-account` sends the
+stored grant as `x-dsh-auth-token`, which the gateway does not read. So the
+account still owns login, balance and sign-out, while inference authenticates
+with the per-user `sk-` that `GET /api/account/model-access` issues.
+
+What is missing is the delivery step: nothing yet fetches that endpoint and
+writes the key into the credentialed `apiKeyEnv` reference on startup and after
+sign-in. The previous shell did it in `src/main/account/provider-sync.ts`; here it
+belongs in a fork-owned plugin row mounted from this layer.

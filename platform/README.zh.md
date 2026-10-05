@@ -77,11 +77,16 @@ DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 
 官方 Electron 欢迎窗口的 Sign in、设置里的账号页、桌面引导的额度页、`deepseek-account` 模型 provider —— 全部经 `ctx.deepseekAccount` 只能和 `platformOrigin` 说话。把这一行指向本产品，它们就都落到 `server/src/routes/dsh-account.ts` 实现的官方协议面上，再由它转发到既有的 `/api/auth/*` 端点。
 
-### 还没做的一环：模型路由
+### 还缺的一环：把每个用户的网关 key 送进 provider
 
-`llm-deepseek-account` 说的是 Anthropic Messages 协议，而本产品网关（New API）提供的是 OpenAI 兼容的 `/v1`。所以模型必须走 `llm-pi-ai` —— `packages/bundle/base/cordis.patch.yml` 已经把它挂好但处于休眠：
+网关**确实提供 Anthropic Messages 格式**，所以不需要第二个适配器：本产品的 New API 部署把 `POST /v1/messages` 当作 `RelayFormatClaude` 处理（`relay/server/router/relay-router.go`），并且接受 `x-api-key` 作为凭据（`relay/server/middleware/auth.go` 的 `TokenAuth` 会把 `/v1/messages` 的 `x-api-key` 映射成 `Authorization: Bearer`）。
 
-- `llm-pi-ai` 设置段为空时它一条路由都不注册；
-- 缺的是一个客户端插件：在启动与登录时拉 `GET /api/config` 与 `/api/account/model-access`，然后写 `llm-pi-ai` 设置段和 `apiKeyEnv` 凭据引用。
+因此正确的路径是官方的 **API-key** provider：`llm-deepseek`（`packages/llm/llm-deepseek-api-key`）本来就用 `x-api-key`，它只差
 
-这一环尚未实现。
+- `baseURL: https://ai.czmanong.com/v1`（Messages 请求会打到 `<root>/messages`），
+- `models` 指向本产品的模型目录，
+- `apiKeyEnv` 指向存放该用户网关 key 的凭据。
+
+账号 provider 走不了这条路：`llm-deepseek-account` 把授权 token 当 `x-dsh-auth-token` 发，而网关不读这个头。所以**账号仍然负责登录、余额与退登**，而推理用 `GET /api/account/model-access` 签发的该用户 `sk-` 认证。
+
+缺的是投递那一步：目前还没有东西在启动与登录后去取那个端点，并把 key 写进那个带凭据的 `apiKeyEnv` 引用。旧壳在 `src/main/account/provider-sync.ts` 里做这件事；在这里它应当是本层挂载的 fork 自有插件行。
