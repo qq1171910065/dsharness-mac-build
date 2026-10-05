@@ -49,6 +49,18 @@ DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 
 The script merges instead of overwriting, because the official plugin manager records user toggles (`- id: ...` / `disabled: true`) in that same file.
 
+### Rows here can mount fork-owned code
+
+A row's `name` resolves relative to the patch file that declares it, so this layer can mount a plugin that lives beside it instead of upstream:
+
+```yaml
+- insert:
+    - id: dsharness-some-plugin
+      name: ./some-plugin.mjs
+```
+
+That was verified by booting the `web` profile with a home-level patch that inserted such a row and observing the plugin's side effect (`loaded:dsharness-platform-probe`). It means fork-owned capability needs neither an upstream package nor a published npm name.
+
 ## What it changes
 
 `cordis.patch.yml` overrides the `deepseek-account` row that `packages/bundle/base/cordis.patch.yml` declares. A patch replaces a row's whole `config`, so the entry restates every key that row owns:

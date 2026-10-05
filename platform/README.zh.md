@@ -49,6 +49,20 @@ DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 
 脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关（`- id: ...` / `disabled: true`）也记在同一个文件里。
 
+### 这里的行可以直接挂 fork 自有的代码
+
+一行的 `name` 是相对**声明它的那个补丁文件**解析的，所以本层可以挂一个就放在旁边的插件，而不必是上游包：
+
+```yaml
+- insert:
+    - id: dsharness-some-plugin
+      name: ./some-plugin.mjs
+```
+
+这一点是实测的：往 home 级补丁里插入这样一行再启动 `web` profile，观察到了插件的副作用（`loaded:dsharness-platform-probe`）。也就是说 fork 自有能力既不需要上游包，也不需要发布到 npm 的名字。
+
+脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关（`- id: ...` / `disabled: true`）也记在同一个文件里。
+
 ## 它改了什么
 
 `cordis.patch.yml` 覆盖 `packages/bundle/base/cordis.patch.yml` 声明的 `deepseek-account` 行。补丁是**整块替换** `config`，所以条目要把该行拥有的键全部重述一遍：
