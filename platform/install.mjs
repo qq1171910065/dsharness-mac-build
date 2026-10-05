@@ -2,7 +2,7 @@
 /**
  * Merge this fork's deployment rows into the machine-level profile patch layer.
  *
- * $DSH_HOME/cordis.patch.yml is read for EVERY profile -- web, desktop,
+ * The home-level cordis.patch.yml is read for EVERY profile -- web, desktop,
  * headless, sdk, acp -- and it ranks ABOVE the per-profile layer
  * (packages/boot/app-boot/src/profile-context.ts#readProfilePatches: bundle
  * layers, then the profile's own patch, then this one, then argv overlays). That
@@ -52,24 +52,25 @@ export function resolveDshHome(environment = process.env) {
  */
 export function mergeManagedBlock(existing, block) {
   const text = String(existing ?? '');
-  const managed = ${BEGIN}\n${block.trimEnd()}\n${END}\n;
+  const body = String(block ?? '').trimEnd();
+  const managed = [BEGIN, body, END, ''].join('\n');
   const start = text.indexOf(BEGIN);
   if (start < 0) {
     if (text.trim() === '') return managed;
     // Keep the user's document intact; our later rows win per row id anyway.
-    return ${text.trimEnd()}\n\n${managed};
+    return [text.trimEnd(), '', managed].join('\n');
   }
   const end = text.indexOf(END, start);
   const after = end < 0 ? '' : text.slice(end + END.length).replace(/^\n+/, '');
   const before = text.slice(0, start);
-  return after === '' ? ${before}${managed} : ${before}${managed}\n${after};
+  return after === '' ? [before, managed].join('') : [before, managed, after].join('\n');
 }
 
 function main() {
   const home = resolveDshHome();
   const target = join(home, 'cordis.patch.yml');
   const source = join(here, 'cordis.patch.yml');
-  if (!existsSync(source)) throw new Error(missing ${source});
+  if (!existsSync(source)) throw new Error(`missing ${source}`);
 
   const block = readFileSync(source, 'utf8');
   const existing = existsSync(target) ? readFileSync(target, 'utf8') : '';
@@ -81,9 +82,9 @@ function main() {
   const origin = String(process.env.DSH_PLATFORM_ORIGIN || '').trim() || 'http://127.0.0.1:13090';
   process.stdout.write(
     [
-      [platform] wrote ${target},
-      [platform] managed rows: deepseek-account,
-      [platform] account origin: ${origin},
+      `[platform] wrote ${target}`,
+      '[platform] managed rows: deepseek-account',
+      `[platform] account origin: ${origin}`,
       '',
     ].join('\n')
   );
