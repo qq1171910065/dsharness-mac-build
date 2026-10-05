@@ -86,11 +86,23 @@ const originalBranch = git('rev-parse', '--abbrev-ref', 'HEAD');
 
 /* 3. fetch upstream */
 if (fetchFirst) {
-  const fetched = tryGit('fetch', 'upstream', 'master');
+  /*
+   * GitHub from this network intermittently drops the TLS handshake
+   * (`SSL_ERROR_SYSCALL`), which is a flake rather than a broken remote: the same
+   * command succeeds seconds later, and `git ls-remote` against the same URL
+   * answers in ~2s. Retry before reporting it, so a flaky network does not read
+   * as "this fork cannot be updated".
+   */
+  let fetched = { ok: false, out: '' };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    fetched = tryGit('fetch', 'upstream', 'master');
+    if (fetched.ok) break;
+    if (attempt < 3) execFileSync(process.execPath, ['-e', 'setTimeout(()=>{}, 2000)']);
+  }
   check('git fetch upstream master succeeds', fetched.ok,
     fetched.ok ? '' : fetched.out.split('\n')[0]);
   if (!fetched.ok) {
-    console.log('       (network failure -- rerun with --no-fetch to check against the local ref)');
+    console.log('       (network failure after 3 attempts -- rerun with --no-fetch to check against the local ref)');
   }
 }
 
