@@ -49,6 +49,19 @@ DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 
 The script merges instead of overwriting, because the official plugin manager records user toggles (`- id: ...` / `disabled: true`) in that same file.
 
+### Packaging this product's Desktop build
+
+Upstream reads packaging settings from `apps/desktop/.env.windows` (or `.env.macos`), which `.gitignore` excludes, so a local deployment file never reaches the repository. This product needs it to supply the application identity and the updater origin, because upstream requires an explicit `DSH_DESKTOP_APP_ID` and hard-codes the production updater origin:
+
+```
+DSH_DESKTOP_APP_ID=com.czmanong.dsharness
+DSH_DESKTOP_AUTO_UPDATE_ENV=test
+DOWNLOAD_TEST_ORIGIN=https://www.czmanong.com
+DOWNLOAD_TEST_RELEASE_ID=<32 hex characters>
+```
+
+The `test` deployment is fully environment-driven; the `production` one is not, which is why the updater can only point at this product through the test channel until that becomes a configuration seam upstream.
+
 ### Rows here can mount fork-owned code
 
 A row's `name` resolves relative to the patch file that declares it, so this layer can mount a plugin that lives beside it instead of upstream:

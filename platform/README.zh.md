@@ -49,6 +49,19 @@ DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 
 脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关（`- id: ...` / `disabled: true`）也记在同一个文件里。
 
+### 打包本产品的桌面版
+
+上游从 `apps/desktop/.env.windows`（或 `.env.macos`）读打包设置，而 `.gitignore` 排除了它 —— 所以本机部署文件永远不会进仓库。本产品需要它来提供应用身份与更新源，因为上游要求显式给 `DSH_DESKTOP_APP_ID`，且把生产更新源硬编码在代码里：
+
+```
+DSH_DESKTOP_APP_ID=com.czmanong.dsharness
+DSH_DESKTOP_AUTO_UPDATE_ENV=test
+DOWNLOAD_TEST_ORIGIN=https://www.czmanong.com
+DOWNLOAD_TEST_RELEASE_ID=<32 hex characters>
+```
+
+`test` 这套完全由环境变量驱动；`production` 那套不是 —— 所以在上游把它变成配置接缝之前，更新源只能通过 test 通道指向本产品。
+
 ### 这里的行可以直接挂 fork 自有的代码
 
 一行的 `name` 是相对**声明它的那个补丁文件**解析的，所以本层可以挂一个就放在旁边的插件，而不必是上游包：
