@@ -1,9 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mergeManagedBlock, resolveDshHome } from './install.mjs';
+import { PLUGIN_FILES, installInto, mergeManagedBlock, removeFrom, resolveDshHome } from './install.mjs';
 
 /**
  * The deployment patcher's contract.
@@ -69,23 +70,108 @@ test('content after the managed block is not lost either', () => {
   assert.equal(merged.match(/# >>> dsharness platform rows/g)?.length, 1);
 });
 
-test('the shipped cordis.patch.yml targets only deepseek-account and asserts no name', () => {
+test('the shipped cordis.patch.yml targets deepseek-account and asserts no name', () => {
   const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
-  // Exactly one non-insert patch, aimed at a row id that really exists upstream.
+  // The account row: a non-insert patch, aimed at a row id that really exists upstream.
   assert.match(text, /^- id: deepseek-account$/m);
   /*
-   * `name` in a non-insert patch is an ASSERTION: a mismatch makes the whole
+   * `name` in a NON-INSERT patch is an ASSERTION: a mismatch makes the whole
    * patch silently skip (`vendor/include/src/index.ts`: name mismatch -> warn and
-   * skip). Leaving it out means an upstream package rename cannot quietly turn
-   * this deployment back into "login talks to DeepSeek".
+   * skip). Leaving it out of that row means an upstream package rename cannot
+   * quietly turn this deployment back into "login talks to DeepSeek".
+   *
+   * An `insert` row is the opposite: there `name` is the thing being created, and
+   * it must be present -- the whole point of the insert is to mount our plugin.
+   * So the assertion is scoped to the account row's own patch block.
    */
-  assert.ok(!/^\s*name:/m.test(text), 'must not assert name: a mismatch silently skips the whole patch');
+  const accountRowEnd = text.indexOf('\n\n# ---');
+  const accountRow = accountRowEnd < 0 ? text : text.slice(0, accountRowEnd);
+  assert.ok(!/^\s*name:/m.test(accountRow), 'the account patch must not assert name: a mismatch silently skips it');
   // The account origin must be configurable, and loopback HTTP must be allowed
   // for local development where platformOrigin is http://127.0.0.1:13090.
-  assert.match(text, /platformOrigin: !!js process\.env\.DSH_PLATFORM_ORIGIN/);
-  assert.match(text, /allowLoopbackHttp:/);
+  assert.match(accountRow, /platformOrigin: !!js process\.env\.DSH_PLATFORM_ORIGIN/);
+  assert.match(accountRow, /allowLoopbackHttp:/);
   // The whole config must be restated: a patch replaces it, it does not merge.
   for (const key of ['desktopPlatform', 'inferenceOrigin', 'requestTimeoutMs', 'attemptTimeoutMs']) {
-    assert.match(text, new RegExp(`^\\s*${key}:`, 'm'), `config must restate ${key}`);
+    assert.match(accountRow, new RegExp(`^\\s*${key}:`, 'm'), `config must restate ${key}`);
+  }
+});
+
+test('the shipped cordis.patch.yml mounts the fork-owned host-auth plugin', () => {
+  const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
+  // It must be an insert: upstream has no such row, so an insert cannot conflict
+  // with anything upstream declares.
+  assert.match(text, /^- insert:$/m);
+  assert.match(text, /- id: dsharness-host-auth$/m);
+  // The installed file name, which is what installInto copies into $DSH_HOME.
+  const installed = PLUGIN_FILES.map(([, target]) => target);
+  for (const target of installed) {
+    assert.ok(text.includes(`name: ./${target}`), `row must mount ./${target}`);
+  }
+  // The secret is read from the environment; it must never be written into the repo.
+  assert.match(text, /token: !!js process\.env\.DSH_AUTH_TOKEN \?\? ''/);
+  assert.ok(!/token:\s*['"]?[A-Za-z0-9_-]{16,}/.test(text), 'no literal secret may appear in the shipped rows');
+});
+
+test('installInto: copies every plugin beside the patch and drops the rows in', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
+  try {
+    const block = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
+    const { target, installed } = installInto(home, block);
+    assert.equal(target, join(home, 'cordis.patch.yml'));
+    assert.deepEqual(installed, PLUGIN_FILES.map(([, name]) => name));
+    for (const [, fileName] of PLUGIN_FILES) {
+      const copy = join(home, fileName);
+      assert.ok(existsSync(copy), `${fileName} must land beside the patch file`);
+      // Byte-identical: the copy is a deployment artifact, not an edit surface.
+      assert.equal(readFileSync(copy, 'utf8'), readFileSync(join(here, fileName.replace('dsharness-', '')), 'utf8'));
+    }
+    assert.match(readFileSync(target, 'utf8'), /# >>> dsharness platform rows/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('installInto: rerunning is idempotent and cannot accumulate copies', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
+  try {
+    const block = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
+    installInto(home, block);
+    const once = readFileSync(join(home, 'cordis.patch.yml'), 'utf8');
+    installInto(home, block);
+    assert.equal(readFileSync(join(home, 'cordis.patch.yml'), 'utf8'), once);
+    assert.equal(readdirSync(home).length, PLUGIN_FILES.length + 1, 'no stray copies');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('installInto: an operator row outside the block survives, and last-write-wins holds', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
+  try {
+    writeFileSync(join(home, 'cordis.patch.yml'), '- id: tool-ralph\n  disabled: false\n', 'utf8');
+    installInto(home, '- id: deepseek-account\n  config: {}\n');
+    const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8');
+    assert.ok(text.startsWith('- id: tool-ralph'), 'the operator row must survive verbatim');
+    assert.ok(text.indexOf('tool-ralph') < text.indexOf('dsharness platform rows (managed'));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('removeFrom: takes back both the rows and the copies this script owns', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
+  try {
+    writeFileSync(join(home, 'cordis.patch.yml'), '- id: tool-ralph\n  disabled: false\n', 'utf8');
+    installInto(home, readFileSync(join(here, 'cordis.patch.yml'), 'utf8'));
+    removeFrom(home);
+    const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8');
+    assert.ok(text.includes('tool-ralph'), 'operator rows must not be removed with ours');
+    assert.ok(!text.includes('dsharness platform rows (managed'), 'our block must be gone');
+    for (const [, fileName] of PLUGIN_FILES) {
+      assert.equal(existsSync(join(home, fileName)), false, `${fileName} must be removed`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

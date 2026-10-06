@@ -34,8 +34,11 @@ git merge upstream/master      # never conflicts in platform/
 ```text
 platform/
   cordis.patch.yml         deployment rows: point the official login at this product
-  install.mjs              merge the above into $DSH_HOME/cordis.patch.yml
-  install.test.mjs         the merge rules (7 cases)
+  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
+  install.mjs              merge the rows into $DSH_HOME/cordis.patch.yml, copy the plugin beside them
+  install.test.mjs         the merge and copy rules (12 cases)
+  host-auth.test.mjs       the plugin's pure functions (18 cases)
+  check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
@@ -91,11 +94,45 @@ DOWNLOAD_TEST_RELEASE_ID=<32 hex characters>
 
 这一点是实测的：往 home 级补丁里插入这样一行再启动 `web` profile，观察到了插件的副作用（`loaded:dsharness-platform-probe`）。也就是说 fork 自有能力既不需要上游包，也不需要发布到 npm 的名字。
 
-脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关（`- id: ...` / `disabled: true`）也记在同一个文件里。
+但相对 `name` 是相对**声明它的那个补丁文件**解析的，而 `install.mjs` 把那个文件写进 `$DSH_HOME`。所以插件必须待在**那份副本旁边**，而不是本 README 旁边：`install.mjs` 会把 `PLUGIN_FILES` 里的每个文件复制进 home 目录，行引用的是副本（`name: ./dsharness-host-auth.mjs`）。于是一个脚本同时管住「行」与「它挂的代码」的落点，两者不可能各说各话；`--remove` 也会把两者一起收回去。
+
+### 服务端到服务端访问官方 `/api`（`host-auth.mjs`）
+
+官方 `/api` 用的是一个只有拿着 `dsh web` 启动令牌的浏览器才换得到的 cookie（`packages/client/connection/src/browser-auth.ts`）。**没有浏览器**的调用方 —— 另一个产品的服务端、脚本、小程序后端 —— 拿不到它，也不该为此去跑一个浏览器。
+
+`host-auth.mjs` 增加一种落在同一处的凭据：正确的共享密钥（`Authorization: Bearer <密钥>`，或本插件发的 cookie）会被换算成**只服务这一次请求**的连接 cookie，追加到请求上。官方那两层校验照常执行，只是它们看到的请求已经满足了要求。
+
+| 调用方 | 怎么进去 |
+|--------|----------|
+| 不带凭证 | 被官方连接层 401 —— 本插件自己不放开任何东西 |
+| 错密钥 / 过短密钥 | 同上，401 |
+| `Authorization: Bearer <密钥>` | 放行；覆盖 unary RPC **以及** `/api/remote.mux` 升级 |
+| 局域网里的浏览器 | `/dsharness/auth` 用密钥换 cookie，之后 `/` 与 `/api` 都能用 |
+| 密钥未配置或短于 16 位 | 插件什么都不做（一条 warn）；`/api` 保持上游行为 |
+
+它包装的是 `connection.requestRejection` 与 `connection.authorizeIndex`，而不是注册路由 —— 因为 `/api` 已经被占了：`webServer.register` 对同一个 `(kind, path)` 重复注册会抛错，而升级握手那条路由由 `api-gateway` 单独注册。两处准入判断最终都汇到这两个服务方法上，所以**一处包装覆盖全部载体**。
+
+它**不是第二套鉴权**：Host/Origin 围栏与连接 cookie 校验仍然做决定，没有新增信任主体，比较用 `timingSafeEqual`。插件是零依赖 `.mjs`（只 import `node:` 内置模块），因为本层没有 `node_modules`：配置按普通对象读，连接凭据的键直接写字面量（`client-connection/browser-session`，也就是 `credentialKey(scope, id)` 的产物）。
+
+启动时它会铸一个 cookie 走一遍官方 `requestRejection` 做自检；上游格式漂移会**立刻 warn**，而不是等到线上 401。`check-host-auth.mjs` 对跑着的 profile 覆盖整条链路：
+
+```sh
+# one terminal: a gated profile
+$env:DSH_HOME="$env:TEMP\dsh-auth"; $env:DSH_AUTH_TOKEN='<at least 16 chars>'
+node platform/install.mjs
+node apps/cli/lib/bin.js web --port 13096 --no-open
+# another
+$env:DSH_AUTH_TOKEN='<the same secret>'; node platform/check-host-auth.mjs
+```
+
+本机实测：无凭证 / 错密钥 / 过短密钥一律 401；正确密钥进得了真实 RPC 面（`result.ok: true`）；登录页发的 cookie 同样能过；`/` 无凭证 401、带 cookie 200；mux 升级握手通过并收到数据帧。
 
 ## 它改了什么
 
-`cordis.patch.yml` 覆盖 `packages/bundle/base/cordis.patch.yml` 声明的 `deepseek-account` 行。补丁是**整块替换** `config`，所以条目要把该行拥有的键全部重述一遍：
+`cordis.patch.yml` 有两条行，而且刻意是两种不同的东西：
+
+1. **覆盖** `packages/bundle/base/cordis.patch.yml` 声明的 `deepseek-account` 行 —— 补丁是**整块替换** `config`，所以条目要把该行拥有的键全部重述一遍；
+2. **插入** `dsharness-host-auth` —— 上游没有这一行。插入在构造上就不可能和上游冲突，所以 fork 自有的插件走「新增一行」而不是「改一行」。
 
 | 键 | 上游默认 | 本部署 |
 |----|----------|--------|

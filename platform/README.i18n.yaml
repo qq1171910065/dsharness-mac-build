@@ -21,11 +21,14 @@
   en: 90d3c05f1eb96035
   zh: ebb4cb28b0429099
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/rows-here-can-mount-fork-owned-code:
-  en: 0fc0739c5df7bf78
-  zh: 1177a2fd736a4b2b
+  en: 1102ecc513b21b7c
+  zh: f080eb4ded182d36
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/server-to-server-access-to-the-official-api-host-auth-mjs:
+  en: 85ca84e7b950ec7f
+  zh: b677d38792e68f69
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes:
-  en: 5153d7711d920997
-  zh: ea111006b5754e04
+  en: 129668942e8e03f0
+  zh: c76cce1698be5f70
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-one-row-wires-every-official-login:
   en: cfc676845b524ef0
   zh: 2e7c26e64e5b22fb

@@ -34,8 +34,11 @@ This layer therefore edits no upstream file and uses three public mechanisms:
 ```text
 platform/
   cordis.patch.yml         deployment rows: point the official login at this product
-  install.mjs              merge the above into $DSH_HOME/cordis.patch.yml
-  install.test.mjs         the merge rules (7 cases)
+  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
+  install.mjs              merge the rows into $DSH_HOME/cordis.patch.yml, copy the plugin beside them
+  install.test.mjs         the merge and copy rules (12 cases)
+  host-auth.test.mjs       the plugin's pure functions (18 cases)
+  check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
@@ -98,9 +101,45 @@ A row's `name` resolves relative to the patch file that declares it, so this lay
 
 That was verified by booting the `web` profile with a home-level patch that inserted such a row and observing the plugin's side effect (`loaded:dsharness-platform-probe`). It means fork-owned capability needs neither an upstream package nor a published npm name.
 
+But a relative `name` resolves against **the patch file that declares it**, and `install.mjs` writes that file into `$DSH_HOME`. So the plugin has to live **beside the copy**, not beside this README: `install.mjs` copies every entry of `PLUGIN_FILES` into the home directory and the row references the copy (`name: ./dsharness-host-auth.mjs`). One script then keeps the row and its code on the same path, so they cannot disagree, and `--remove` takes both back.
+
+### Server-to-server access to the official `/api` (`host-auth.mjs`)
+
+The official `/api` authenticates with a cookie that only a browser holding the launch token `dsh web` printed can obtain (`packages/client/connection/src/browser-auth.ts`). A caller with **no browser** — another product's server, a script, a mini program backend — cannot get one, and should not have to drive a browser to try.
+
+`host-auth.mjs` adds a second credential that lands in the same place: a correct shared secret (`Authorization: Bearer <secret>`, or the cookie this plugin issues) is converted into a one-request connection cookie and appended to the request. The official checks still run; they just see a request that already satisfies them.
+
+| caller | how it gets in |
+|--------|----------------|
+| no credential | 401 from the official connection layer — this plugin does not open anything by itself |
+| wrong or short secret | 401, same as above |
+| `Authorization: Bearer <secret>` | admitted; covers unary RPC **and** the `/api/remote.mux` upgrade |
+| browser on the LAN | `/dsharness/auth` exchanges the secret for a cookie, then `/` and `/api` both work |
+| secret unset or shorter than 16 chars | plugin does nothing (one warning); `/api` keeps upstream behaviour |
+
+It wraps `connection.requestRejection` and `connection.authorizeIndex` instead of registering a route, because `/api` is already claimed: `webServer.register` throws on a duplicate `(kind, path)`, and the upgrade path is registered separately by `api-gateway`. Both admission decisions funnel through those two service methods, so one wrap covers every carrier.
+
+It is **not a second authentication stack**: the Host/Origin fence and the connection-cookie check still decide, no new trust principal appears, and the comparison is `timingSafeEqual`. The plugin is zero-dependency `.mjs` (only `node:` imports) because this layer has no `node_modules`: it reads config as a plain object and writes the connection key literal (`client-connection/browser-session`, the value `credentialKey(scope, id)` produces).
+
+On startup it self-checks by minting a cookie and running it through the official `requestRejection`; a format drift upstream warns immediately instead of surfacing as a 401 in production. `check-host-auth.mjs` covers the whole thing against a running profile:
+
+```sh
+# one terminal: a gated profile
+$env:DSH_HOME="$env:TEMP\dsh-auth"; $env:DSH_AUTH_TOKEN='<at least 16 chars>'
+node platform/install.mjs
+node apps/cli/lib/bin.js web --port 13096 --no-open
+# another
+$env:DSH_AUTH_TOKEN='<the same secret>'; node platform/check-host-auth.mjs
+```
+
+Verified locally: no credential / wrong secret / short secret all 401; the correct secret reaches the real RPC surface (`result.ok: true`); the login page issues a cookie that also passes; `/` is 401 without and 200 with; the mux upgrade opens and delivers a frame.
+
 ## What it changes
 
-`cordis.patch.yml` overrides the `deepseek-account` row that `packages/bundle/base/cordis.patch.yml` declares. A patch replaces a row's whole `config`, so the entry restates every key that row owns:
+`cordis.patch.yml` has two rows, and they are deliberately different kinds:
+
+1. **an override** of the `deepseek-account` row that `packages/bundle/base/cordis.patch.yml` declares — a patch replaces a row's whole `config`, so the entry restates every key that row owns;
+2. **an insert** of `dsharness-host-auth`, which upstream does not declare. An insert cannot conflict with upstream by construction, which is why the fork-owned plugin goes in as a new row rather than as an edit to an existing one.
 
 | key | upstream default | this deployment |
 |-----|------------------|-----------------|

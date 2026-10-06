@@ -38,3 +38,29 @@
     logoutMaxRetries: 5
     logoutRetryDelayMs: 1000
     attemptTimeoutMs: 600000
+
+# ---------------------------------------------------------------------------
+# 服务端到服务端通道（小程序 / 外部产品 / 脚本）
+#
+# 官方 `/api` 只认 `dsh web` 启动令牌换来的连接 cookie，那个令牌是进程内私有
+# 的，坐在浏览器外面的人拿不到。这一行挂上本 fork 自己的插件，让它接受
+# 「共享密钥」这一种等价凭据：`Authorization: Bearer <密钥>`（或本插件发的
+# cookie）会被换算成一次性的连接 cookie，官方那两层校验照常执行。
+#
+# ⚠️ 挂载方式与上面那条**刻意不同**：这是 `insert`（新增一行），
+# 上游没有这一行，所以它不可能与上游冲突；而上面那条是改上游已声明的行的
+# 配置。两条都只存在于本 fork 的 `platform/` 里，上游一行未改。
+#
+# `name` 相对**本文件**解析。这个文件被 `install.mjs` 写到 `$DSH_HOME/`，
+# 插件也跟着被复制到同一个目录 —— 于是「受管行」与「它挂载的代码」始终一起走，
+# 不会出现「行在、代码不在」。密钥从环境变量读（`DSH_AUTH_TOKEN`），**不写进仓库**。
+# ---------------------------------------------------------------------------
+- insert:
+    - id: dsharness-host-auth
+      name: ./dsharness-host-auth.mjs
+      config:
+        # 留空即未配置；插件自己的 resolveConfig 会退化为「什么都不做」并记一条 warn。
+        token: !!js process.env.DSH_AUTH_TOKEN ?? ''
+        cookieName: dsharness_auth
+        loopbackBypass: true
+        loginPage: true
