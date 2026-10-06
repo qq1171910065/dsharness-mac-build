@@ -27,16 +27,19 @@ This layer therefore edits no upstream file and uses three public mechanisms:
 
 1. the profile patch layer (`cordis.patch.yml`) overrides or disables rows by `id`;
 2. cordis plugin packages (`dsh.bundle.patch` for the Host half, `dsh.client` for the browser half) add capability;
-3. the machine-level host configuration (`$DSH_HOME/cordis.patch.yml`) applies overrides to every profile, including the application-owned `desktop` one.
+3. the machine-level host configuration (`$DSH_HOME/cordis.patch.yml`) applies overrides to every profile, including the application-owned `desktop` one — **config overrides only**; fork-owned plugins are provisioned as bundle packages instead, so the official Plugins page can switch them.
 
 ## Layout
 
 ```text
 platform/
   cordis.patch.yml         deployment rows: point the official login at this product
+  install.mjs              write those rows, then provision the profile plugins
+  provision.mjs            install this product's plugins in the shape the Plugins page can switch
   host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
-  install.mjs              merge the rows into $DSH_HOME/cordis.patch.yml, copy the plugin beside them
-  install.test.mjs         the merge and copy rules (12 cases)
+  home.mjs                 the $DSH_HOME resolution both scripts share
+  install.test.mjs         the deployment rows (11 cases)
+  provision.test.mjs       the plugin provisioning policy (16 cases)
   host-auth.test.mjs       the plugin's pure functions (18 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
@@ -76,7 +79,9 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-The script merges instead of overwriting, because the official plugin manager records user toggles (`- id: ...` / `disabled: true`) in that same file.
+The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugins this product ships into every profile it finds (see the plugins section below). `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated packages, our dependency entries and our selections.
+
+`DSHARNESS_SKIP_INSTALL=1` makes `dev-all.ps1` pass `--no-marketplace`, because that switch already means "do not use the network here".
 
 ### Packaging this product's Desktop build
 
@@ -93,7 +98,7 @@ The `test` deployment is fully environment-driven; the `production` one is not, 
 
 ### Rows here can mount fork-owned code
 
-A row's `name` resolves relative to the patch file that declares it, so this layer can mount a plugin that lives beside it instead of upstream:
+A row's `name` resolves relative to the patch file that declares it, so a layer can mount a plugin that lives beside it instead of upstream:
 
 ```yaml
 - insert:
@@ -103,7 +108,101 @@ A row's `name` resolves relative to the patch file that declares it, so this lay
 
 That was verified by booting the `web` profile with a home-level patch that inserted such a row and observing the plugin's side effect (`loaded:dsharness-platform-probe`). It means fork-owned capability needs neither an upstream package nor a published npm name.
 
-But a relative `name` resolves against **the patch file that declares it**, and `install.mjs` writes that file into `$DSH_HOME`. So the plugin has to live **beside the copy**, not beside this README: `install.mjs` copies every entry of `PLUGIN_FILES` into the home directory and the row references the copy (`name: ./dsharness-host-auth.mjs`). One script then keeps the row and its code on the same path, so they cannot disagree, and `--remove` takes both back.
+It is **not** how this product ships its plugins, though — such a row belongs to no
+package, so the official Plugins page cannot list or switch it. See the next
+section: fork-owned plugins go in as bundle packages, and only config overrides of
+rows upstream already declares stay in the home-level patch.
+
+### Plugins this product ships are real bundle packages
+
+The product decision is two-sided: the gateway plugin is a **custom plugin, off by
+default**, and the community marketplace (`dshmarket`) is **on by default**. Both
+are decided by packaging, not by anything a patch row can say.
+
+The official Plugins page (`packages/client/ui-plugin-manager`) lists **packages**
+(`pluginManager/listBundles`) and splits them with two package flags:
+
+| group | condition |
+|-------|-----------|
+| Installed | `installed \|\| !optional` |
+| Official | `optional && !installed` |
+
+A row inserted straight from a patch file belongs to no package, so the page never
+mentions it. Measured on the live desktop Host: the row *was* addressable by
+`listPlugins` (`patchId: dsharness-host-auth`) while `listBundles` knew nothing
+about it — there was no card to switch, which is exactly what the request is about.
+`optional` is not deployment-settable either; it comes from the launcher's own
+`OPTIONAL_BUNDLES` allowlist.
+
+What *is* deployment-actionable, and all `provision.mjs` writes, is the pair:
+
+- **`installed`** — a real bundle package in the profile's `node_modules`, named in
+  the profile manifest's `dependencies`;
+- **`enabled`** — membership in `dsh.profile.bundles`. A bundle listed there runs;
+  one that is merely installed does not.
+
+So *off by default* is **installed but not selected**, and *on by default* is
+**installed and selected**. Both are then switchable in the page through the
+official `setBundleEnabled`, with no mechanism of ours in the loop.
+
+Measured on the live desktop Host after `node platform/install.mjs`:
+
+```text
+dsharness-host-auth  installed=true   enabled=false  title{zh: "DSH Desktop 网关"}   rows=[dsharness-host-auth]
+dshmarket            installed=true   enabled=true   title{zh: "插件市场"}          rows=[dsh-market]
+```
+
+`--dump-config` agrees: with the selection list as written, the composed tree has
+`dsh-market` and **no** `dsharness-host-auth` row. Turning ours on through the
+official switch (`pluginManager/setBundleEnabled`) then makes the shared-secret
+channel answer 200 for the right secret while wrong/absent secrets stay 401 —
+`check-host-auth.mjs` covers that against the live Host.
+
+#### No default state is ever written into a patch layer
+
+The tempting alternative — keep inserting the row from `$DSH_HOME/cordis.patch.yml`
+and write `disabled: true` — is a dead end, and worth recording because it looks
+right. `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63`)
+applies *bundle layers → profile patch → `$DSH_HOME` patch → overlays*, and a later
+layer overwrites an earlier one per row id. Measured with the real
+`applyEntryPatches`:
+
+```text
+[profile(disabled=false), home(insert + disabled=true)] → disabled=true
+[home(insert, neutral),   profile(disabled=true)]       → disabled=true
+[home(insert, neutral),   profile(disabled=false)]      → disabled=false
+```
+
+A default written into our managed block is therefore the last word and the page's
+switch could never turn the plugin on. Letting the package own its row removes the
+question: `platform/cordis.patch.yml` now carries a comment-only explanation where
+that `insert` used to be, and `install.test.mjs` asserts no fork-owned insert and no
+`disabled:` remain there.
+
+#### One asymmetry worth knowing
+
+`pnpm` prunes a `link:` target that lives outside the profile, so the generated
+package is a real directory **inside** `<profile>/node_modules` declared as
+`file:./node_modules/<name>` (`pluginInstallSpec`). It also needs no symlink
+privilege, which on Windows would otherwise mean Developer Mode.
+
+Our own packages are placed directly and need no package manager at all, so the
+gateway plugin works on a machine that has never reached npm; only `dshmarket`
+goes through pnpm. A failed marketplace install is reported with the exact manual
+command and never fails the deployment.
+
+#### Turning it off in a live process does not revoke issued cookies
+
+Measured: after enabling and then disabling through `setBundleEnabled`,
+`listBundles` says `enabled: false` and `pluginInventory/list` no longer lists the
+row — yet a request carrying the correct secret **still gets 200** (absent and
+wrong secrets still 401, so it is not a vacuous pass). The cleanup restores the
+`connection` method references, but the connection cookie already exchanged
+remains a valid short-lived credential: upstream does not re-ask who minted it on
+each request. Nothing here can fix that without touching upstream's `connection`,
+and it does not affect the default state, which was never enabled. To invalidate
+immediately, change `DSH_AUTH_TOKEN` and restart — those cookies are signed with
+the connection secret.
 
 ### Server-to-server access to the official `/api` (`host-auth.mjs`)
 

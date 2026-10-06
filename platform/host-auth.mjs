@@ -42,8 +42,9 @@
  *
  * ## 为什么是零依赖的 `.mjs`
  *
- * 这个文件由**部署层**（`$DSH_HOME/cordis.patch.yml` 的 insert 行）挂载，
- * 而部署层挂在 `platform/` 下 —— 那里**没有** `node_modules`，解析不到
+ * 这个文件由 `platform/provision.mjs` 装成**真正的组合包**挂载
+ * （`<profile>/node_modules/dsharness-host-auth/`，见那里的说明）——
+ * 包目录里**没有** `node_modules`，解析不到
  * `@deepseek-ai/schemastery` / `@deepseek-ai/dsh-credentials` 这些裸包名。
  * 所以本文件只 import `node:` 内置模块：
  *
@@ -280,6 +281,20 @@ function readBody(req, limit = 4096) {
 
 /**
  * 挂载。
+ *
+ * ⚠️ **在一个长寿命进程里打开再关掉这个插件时，「关掉」并不完全生效。**
+ *
+ * 实测（真机桌面 Host，经官方 `setBundleEnabled` 打开再关闭）：
+ * `listBundles` 回 `enabled: false`、`pluginInventory/list` 里已经没有这一行，
+ * 但**带正确密钥的 `/api` 仍然 200**（不给密钥照旧 401，所以不是恒真）。
+ * 也就是说 `ctx.effect` 的清理**恢复了 `connection` 上的方法引用**，
+ * 而**已经换取过的连接 cookie 仍被官方那两层认作有效** ——
+ * 它本来就是一个短时凭证，官方并不在每次请求上复查「它是谁铸的」。
+ *
+ * 这不是本插件能修的（要作废已发凭证就得动官方 `connection`），
+ * 也不影响默认态：默认**没打开过**，就从来没有过 cookie。
+ * 真要立刻作废，把密钥换掉（`DSH_AUTH_TOKEN`）并重启 —— cookie 是用
+ * 连接层密钥签的，换密钥即全量失效。
  *
  * @param ctx - Cordis 上下文（`connection` 已通过 `inject` 就绪）。
  * @param config - `{ enabled, token, cookieName, cookieMaxAgeSec, loginPage }`；无 schema。

@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Merge this fork's deployment rows into the machine-level profile patch layer.
  *
@@ -20,6 +19,17 @@
  * written by nothing in the shipped composition, so a managed block there cannot
  * race the plugin manager or the Settings UI.
  *
+ * ## What belongs in the managed block, and what does not
+ *
+ * Only **config overrides of rows upstream already declares** -- today that is the
+ * account row's `platformOrigin`. Fork-owned plugins are **not** inserted here:
+ * they are provisioned as real bundle packages by {@link provisionAll}, so the
+ * official Plugins page can show and switch them. A row inserted from this file
+ * would belong to no package, so the page would never list it — and a `disabled`
+ * written here would be applied **after** the profile layer, so the page's own
+ * switch could never override it. `platform/cordis.patch.yml` carries the
+ * measurement and the reasoning.
+ *
  * ## Why the managed block, and why no YAML library
  *
  * The file is a top-level YAML array and the loader applies it **in order, last
@@ -30,48 +40,20 @@
  * file is where the Deployment/Environment conventions let an operator write
  * their own rows -- and the block is replaced in place, so running this on every
  * launch cannot grow the file.
- *
- * ## Why the plugin file is copied beside the patch
- *
- * A row's relative `name` resolves **relative to the patch file that declares it**
- * (`packages/boot/app-boot/src/index.ts#anchorInsertedPluginNames` rewrites it
- * against the patch's own directory), and the loader is handed the copy in
- * `$DSH_HOME`. So the plugin the row mounts has to exist **next to that copy**,
- * not next to this script. Copying keeps the row and its code on one path: the
- * two can never disagree about where the plugin is, and a `--patch` overlay
- * elsewhere cannot silently orphan the row.
- *
- * The copy is byte-identical to the source; the source stays the single place to
- * edit. Stale copies cannot accumulate -- the target name is fixed, so a rerun
- * overwrites it, and `remove` deletes it.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveDshHome } from './home.mjs';
+import { provisionAll, unprovisionProfile } from './provision.mjs';
 
 const BEGIN = '# >>> dsharness platform rows (managed by platform/install.mjs)';
 const END = '# <<< dsharness platform rows';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/**
- * Fork-owned plugin files the managed rows mount, as `source -> installed name`.
- *
- * The installed name is what the patch row references (`name: ./<installed>`),
- * and the `dsharness-` prefix marks everything this fork owns inside `$DSH_HOME`,
- * so a human (or a later cleanup) can tell our files from the loader's own.
- */
-export const PLUGIN_FILES = [
-  ['host-auth.mjs', 'dsharness-host-auth.mjs'],
-];
-
-/** The same resolution the loader uses: explicit dir, then DSH_HOME, then ~/.dsh. */
-export function resolveDshHome(environment = process.env) {
-  const explicit = String(environment.DSH_HOME || '').trim();
-  return explicit ? resolve(explicit) : join(homedir(), '.dsh');
-}
+export { resolveDshHome };
 
 /**
  * Replace the managed block, or append one when absent.
@@ -100,29 +82,30 @@ export function mergeManagedBlock(existing, block) {
 }
 
 /**
- * Copy every fork-owned plugin to the home directory and merge the rows.
+ * Write the managed rows, then provision the profile plugins.
  *
- * @param home - Harness home receiving the patch file and plugin copies.
+ * @param home - Harness home receiving the patch file.
  * @param block - rendered rows.
- * @returns the installed plugin file names, in copy order.
+ * @param options - passed through to {@link provisionAll} (`write: false` for a
+ *   dry run; `run` injects a fake pnpm runner for specs).
+ * @returns the patch file path and the provisioning reports.
  */
-export function installInto(home, block) {
+export function installInto(home, block, options = {}) {
   const target = join(home, 'cordis.patch.yml');
   const existing = existsSync(target) ? readFileSync(target, 'utf8') : '';
-  mkdirSync(home, { recursive: true });
-  const installed = [];
-  for (const [source, installedName] of PLUGIN_FILES) {
-    const from = join(here, source);
-    if (!existsSync(from)) throw new Error(`missing ${from}`);
-    copyFileSync(from, join(home, installedName));
-    installed.push(installedName);
-  }
   writeFileSync(target, mergeManagedBlock(existing, block), 'utf8');
-  return { target, installed };
+  return { target, reports: provisionAll(home, options) };
 }
 
-/** Remove the managed block and the plugin copies this script owns. */
-export function removeFrom(home) {
+/**
+ * Remove the managed block, and the plugin packages this script owns.
+ *
+ * @param home - Harness home.
+ * @param options - `profiles` overrides the discovered list; otherwise every
+ *   profile under the home is unprovisioned.
+ * @returns the patch file path and the unprovisioning reports.
+ */
+export function removeFrom(home, options = {}) {
   const target = join(home, 'cordis.patch.yml');
   if (existsSync(target)) {
     const text = readFileSync(target, 'utf8');
@@ -134,8 +117,17 @@ export function removeFrom(home) {
       writeFileSync(target, head === '' && after === '' ? '' : [head, after].filter(Boolean).join('\n') + '\n', 'utf8');
     }
   }
-  for (const [, installedName] of PLUGIN_FILES) rmSync(join(home, installedName), { force: true });
-  return target;
+  const profiles = options.profiles ?? discoveredProfiles(home);
+  return { target, reports: profiles.map((profile) => unprovisionProfile(home, profile, options)) };
+}
+
+/** Profile directories under a Harness home, excluding the shared dependency tree. */
+function discoveredProfiles(home) {
+  const dir = join(home, 'profiles');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== 'node_modules')
+    .map((entry) => entry.name);
 }
 
 function main() {
@@ -145,26 +137,55 @@ function main() {
   const block = readFileSync(source, 'utf8');
 
   if (process.argv.includes('--remove')) {
-    const target = removeFrom(home);
+    const { target, reports } = removeFrom(home);
     process.stdout.write(`[platform] removed managed rows from ${target}\n`);
+    for (const report of reports) {
+      process.stdout.write(
+        report.status === 'skipped'
+          ? `[platform] ${report.profile}: nothing to remove (${report.reason})\n`
+          : `[platform] ${report.profile}: removed ${report.removed.join(', ') || 'nothing'}\n`,
+      );
+    }
     return;
   }
 
-  const { target, installed } = installInto(home, block);
+  const dryRun = process.argv.includes('--check');
+  const withMarketplace = !process.argv.includes('--no-marketplace');
+  const { target, reports } = installInto(home, block, { write: !dryRun, withMarketplace });
 
   const origin = String(process.env.DSH_PLATFORM_ORIGIN || '').trim() || 'http://127.0.0.1:13090';
   const token = String(process.env.DSH_AUTH_TOKEN || '').trim();
+  process.stdout.write(`[platform] wrote ${target}\n`);
+  process.stdout.write('[platform] managed rows: deepseek-account (config only)\n');
+  for (const line of describeReports(reports)) process.stdout.write(`${line}\n`);
+  process.stdout.write(`[platform] account origin: ${origin}\n`);
+  // Never print the secret itself, only whether one is present.
   process.stdout.write(
-    [
-      `[platform] wrote ${target}`,
-      '[platform] managed rows: deepseek-account, dsharness-host-auth',
-      `[platform] installed plugins: ${installed.join(', ')}`,
-      `[platform] account origin: ${origin}`,
-      // Never print the secret itself, only whether one is present.
-      `[platform] host auth token: ${token.length >= 16 ? `configured (${token.length} chars)` : 'NOT configured (Set DSH_AUTH_TOKEN to enable)'}`,
-      '',
-    ].join('\n')
+    `[platform] host auth token: ${token.length >= 16 ? `configured (${token.length} chars)` : 'NOT configured (Set DSH_AUTH_TOKEN; the plugin stays usable but does nothing)'}\n`,
   );
+}
+
+/**
+ * Render one provisioning report per profile as human-readable lines.
+ *
+ * Re-exported shape kept local: `main` is the only caller, and the spec asserts
+ * through {@link provisionAll} instead.
+ *
+ * @param reports - reports from {@link provisionAll}.
+ * @returns printable lines.
+ */
+function describeReports(reports) {
+  return reports.map((report) => {
+    const detail = report.status === 'ok' || report.status === 'partial'
+      ? `${(report.installed ?? []).length === 0 ? 'plugins already installed' : `installed ${report.installed.join(', ')}`}`
+      : report.status === 'planned'
+        ? `would install ${report.install.map((entry) => entry.name).join(', ') || 'nothing'}`
+        : report.reason;
+    const failures = (report.failures ?? []).map(
+      (failure) => `\n[platform]   NOT installed: ${failure.what}\n[platform]   reason: ${failure.reason}`,
+    ).join('');
+    return `[platform] ${report.profile}: ${detail}${failures}`;
+  });
 }
 
 // Only run when invoked directly; the exports above exist for the spec.

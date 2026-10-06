@@ -6,8 +6,8 @@
   en: 90921a995c5a0489
   zh: b8cfb47109afcd0e
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/why-not-patch-package-patches:
-  en: f5e62af35b9f83fe
-  zh: 2e3c305cafd8338e
+  en: 6570575cb22e670b
+  zh: f6cb8dd93748a7cc
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/layout:
   en: 1ab8b509e0fe148b
   zh: e7ed18deb4d03ba4
@@ -15,14 +15,26 @@
   en: 4e966e230e0a9b3e
   zh: 29bf43497495e7aa
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage:
-  en: 11014bdcf733cd0b
-  zh: 71ff16da31eeba15
+  en: 79bf51fe511c3304
+  zh: 7ac75cf13243b3f2
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/packaging-this-product-s-desktop-build:
   en: 90d3c05f1eb96035
   zh: ebb4cb28b0429099
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/rows-here-can-mount-fork-owned-code:
-  en: 1102ecc513b21b7c
-  zh: f080eb4ded182d36
+  en: 3f3e7710c4f73ea0
+  zh: fa5ae77c5c4c599d
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages:
+  en: 718c72685f43741f
+  zh: 5ceac1941cc8ba3e
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/no-default-state-is-ever-written-into-a-patch-layer:
+  en: e46716230c23dfff
+  zh: 3a128413358e57d2
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/one-asymmetry-worth-knowing:
+  en: 8ce617094c658562
+  zh: ddb3fc3913c0eb46
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/turning-it-off-in-a-live-process-does-not-revoke-issued-cookies:
+  en: ec450807b5a908c4
+  zh: 95a4a12b0e8f3580
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/server-to-server-access-to-the-official-api-host-auth-mjs:
   en: 85ca84e7b950ec7f
   zh: b677d38792e68f69

@@ -27,16 +27,19 @@ git merge upstream/master      # never conflicts in platform/
 
 1. profile 补丁层（`cordis.patch.yml`）按 `id` 覆盖或停用某一行；
 2. cordis 插件包（Host 半边用 `dsh.bundle.patch`，浏览器半边用 `dsh.client`）增加能力；
-3. 机器级 host 配置（`$DSH_HOME/cordis.patch.yml`）对**每个** profile 生效，包括应用自己拥有的 `desktop`。
+3. 机器级 host 配置（`$DSH_HOME/cordis.patch.yml`）对**每个** profile 生效，包括应用自己拥有的 `desktop` —— 但**只放配置覆盖**；自有插件改成组合包（下一节），这样官方插件页才能开关它。
 
 ## 目录
 
 ```text
 platform/
   cordis.patch.yml         deployment rows: point the official login at this product
+  install.mjs              write those rows, then provision the profile plugins
+  provision.mjs            install this product's plugins in the shape the Plugins page can switch
   host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
-  install.mjs              merge the rows into $DSH_HOME/cordis.patch.yml, copy the plugin beside them
-  install.test.mjs         the merge and copy rules (12 cases)
+  home.mjs                 the $DSH_HOME resolution both scripts share
+  install.test.mjs         the deployment rows (11 cases)
+  provision.test.mjs       the plugin provisioning policy (16 cases)
   host-auth.test.mjs       the plugin's pure functions (18 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
@@ -69,7 +72,9 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关（`- id: ...` / `disabled: true`）也记在同一个文件里。
+脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关也记在同一个文件里；随后它把本产品自带的插件 provision 进每个它能找到的 profile（见下面「自有插件是真正的组合包」）。`--no-marketplace` 不动社区插件市场；`--check` 只报告不写；`--remove` 收回受管行、我们生成的包、依赖项与选中项。
+
+`DSHARNESS_SKIP_INSTALL=1` 会让 `dev-all.ps1` 传 `--no-marketplace` —— 那个开关本来就意味着「这里别联网」。
 
 ### 打包本产品的桌面版
 
@@ -96,7 +101,58 @@ DOWNLOAD_TEST_RELEASE_ID=<32 hex characters>
 
 这一点是实测的：往 home 级补丁里插入这样一行再启动 `web` profile，观察到了插件的副作用（`loaded:dsharness-platform-probe`）。也就是说 fork 自有能力既不需要上游包，也不需要发布到 npm 的名字。
 
-但相对 `name` 是相对**声明它的那个补丁文件**解析的，而 `install.mjs` 把那个文件写进 `$DSH_HOME`。所以插件必须待在**那份副本旁边**，而不是本 README 旁边：`install.mjs` 会把 `PLUGIN_FILES` 里的每个文件复制进 home 目录，行引用的是副本（`name: ./dsharness-host-auth.mjs`）。于是一个脚本同时管住「行」与「它挂的代码」的落点，两者不可能各说各话；`--remove` 也会把两者一起收回去。
+但本产品自带的插件**不走这条路** —— 这样一行不属于任何**包**，官方插件页既列不出也开关不了它（下一节）。自有插件一律做成组合包，home 级补丁里只留「改上游已声明的行」的配置覆盖。
+
+### 自有插件是真正的组合包
+
+产品口径是两面：网关插件是**自定义插件、默认不启用**，社区插件市场（`dshmarket`）**默认启用**。两者都由**打包形态**决定，而不是由某条 patch 行说什么决定。
+
+官方插件页（`packages/client/ui-plugin-manager`）列的是**包**（`pluginManager/listBundles`），并按两个包级标志分组：
+
+| 分组 | 条件 |
+|------|------|
+| 已安装 | `installed \|\| !optional` |
+| 官方 | `optional && !installed` |
+
+一行从 patch 文件直接插进去的行不属于任何包，页面就不会提它。真机桌面 Host 上实测：那一行**能被 `listPlugins` 定位**（`patchId: dsharness-host-auth`），而 `listBundles` 完全不知道它 —— 页面上**没有卡片可切**，而这正是需求本身。`optional` 也不是部署能设的，它来自启动器自己的 `OPTIONAL_BUNDLES` 白名单。
+
+真正可由部署决定、也是 `provision.mjs` 唯一在写的，是这一对：
+
+- **`installed`** —— profile 的 `node_modules` 里有一个真的组合包，并写进 profile manifest 的 `dependencies`；
+- **`enabled`** —— `dsh.profile.bundles` 里有没有它。列在那里才会加载；只是装了不算。
+
+于是**默认不启用**＝**装了但没选中**，**默认启用**＝**装了且选中**。两者之后都能在插件页里用官方 `setBundleEnabled` 切换，中间没有我们自己的机制。
+
+`node platform/install.mjs` 之后在真机桌面 Host 上实测：
+
+```text
+dsharness-host-auth  installed=true   enabled=false  title{zh: "DSH Desktop 网关"}   rows=[dsharness-host-auth]
+dshmarket            installed=true   enabled=true   title{zh: "插件市场"}          rows=[dsh-market]
+```
+
+`--dump-config` 也一致：按写下的选中列表组合出来的树里有 `dsh-market`，**没有** `dsharness-host-auth`。经官方开关（`pluginManager/setBundleEnabled`）把我们那个打开之后，共享密钥通道对正确密钥回 200，而错密钥/无密钥仍是 401 —— `check-host-auth.mjs` 对真机 Host 覆盖了这一段。
+
+#### 默认态绝不写进任何 patch 层
+
+看起来更省事的另一条路 —— 继续从 `$DSH_HOME/cordis.patch.yml` 插入那一行，再在某处写 `disabled: true` —— 是死路，而且值得记下来，因为它看起来是对的。`readProfilePatches`（`packages/boot/app-boot/src/profile-context.ts:63`）的层序是 *bundle 层 → profile 层 → `$DSH_HOME` 层 → overlay*，后应用的层按行 id 覆盖前面的。用真的 `applyEntryPatches` 实测：
+
+```text
+[profile(disabled=false), home(insert + disabled=true)] → disabled=true
+[home(insert, neutral),   profile(disabled=true)]       → disabled=true
+[home(insert, neutral),   profile(disabled=false)]      → disabled=false
+```
+
+即：写进我们受管块的默认态会成为最后一句话，插件页的开关**永远打不开**。让包自己拥有那一行就把这个问题整个消掉：`platform/cordis.patch.yml` 现在只在原处留一段说明，而 `install.test.mjs` 断言那里不再有任何自有 insert、也没有任何 `disabled:`。
+
+#### 一处值得知道的不对称
+
+pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是**真目录**，放在 `<profile>/node_modules` 里，依赖记成 `file:./node_modules/<name>`（`pluginInstallSpec`）。这样也不需要符号链接权限 —— 在 Windows 上那意味着得开开发者模式。
+
+我们自己的包直接落盘、完全不需要包管理器，所以网关插件在从没连过 npm 的机器上也能用；只有 `dshmarket` 走 pnpm。插件市场装失败会带上精确的手工命令如实报告，绝不会让部署失败。
+
+#### 在长寿命进程里「关掉」并不会作废已发出的 cookie
+
+实测：经 `setBundleEnabled` 打开再关闭之后，`listBundles` 说 `enabled: false`、`pluginInventory/list` 里也没有那一行了 —— 但带**正确密钥**的请求**仍然 200**（无密钥与错密钥仍是 401，所以不是恒真放行）。清理确实恢复了 `connection` 上的方法引用，但**已经换取过的连接 cookie 仍是有效的短时凭证**：官方并不会在每次请求上复查它由谁铸的。这要动上游的 `connection` 才能修，而它不影响默认态 —— 默认从没打开过。要立刻作废就换 `DSH_AUTH_TOKEN` 并重启：那些 cookie 是用连接层密钥签的。
 
 ### 服务端到服务端访问官方 `/api`（`host-auth.mjs`）
 

@@ -1,10 +1,11 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PLUGIN_FILES, installInto, mergeManagedBlock, removeFrom, resolveDshHome } from './install.mjs';
+import { installInto, mergeManagedBlock, removeFrom, resolveDshHome } from './install.mjs';
+import { MARKETPLACE_PACKAGE, PROFILE_PLUGINS } from './provision.mjs';
 
 /**
  * The deployment patcher's contract.
@@ -19,9 +20,18 @@ import { PLUGIN_FILES, installInto, mergeManagedBlock, removeFrom, resolveDshHom
  * The rows themselves are applied in order with last-write-wins per row id
  * (`vendor/include/src/index.ts#applyEntryPatches`), which is why appending is
  * semantically sufficient and no YAML parser is required.
+ *
+ * What this file may **not** contain is equally load-bearing, and is asserted
+ * below: no fork-owned plugin row and no `disabled:` of ours. Both would be
+ * applied *after* the profile layer and would therefore be the last word over the
+ * user's own switch in the Plugins page. Fork-owned plugins ship as bundle
+ * packages instead (`provision.mjs`).
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/** Provision with a runner that never shells out; these tests are about the patch file. */
+const noPnpm = { run: () => { throw new Error('these tests must not run pnpm'); } };
 
 test('resolveDshHome: explicit DSH_HOME wins, otherwise falls back to ~/.dsh', () => {
   assert.equal(resolveDshHome({ DSH_HOME: 'C:\\tmp\\home' }), resolve('C:\\tmp\\home'));
@@ -79,68 +89,75 @@ test('the shipped cordis.patch.yml targets deepseek-account and asserts no name'
    * patch silently skip (`vendor/include/src/index.ts`: name mismatch -> warn and
    * skip). Leaving it out of that row means an upstream package rename cannot
    * quietly turn this deployment back into "login talks to DeepSeek".
-   *
-   * An `insert` row is the opposite: there `name` is the thing being created, and
-   * it must be present -- the whole point of the insert is to mount our plugin.
-   * So the assertion is scoped to the account row's own patch block.
    */
-  const accountRowEnd = text.indexOf('\n\n# ---');
-  const accountRow = accountRowEnd < 0 ? text : text.slice(0, accountRowEnd);
-  assert.ok(!/^\s*name:/m.test(accountRow), 'the account patch must not assert name: a mismatch silently skips it');
+  assert.ok(!/^ {4}name:/m.test(text), 'the account patch must not assert name: a mismatch silently skips it');
   // The account origin must be configurable, and loopback HTTP must be allowed
   // for local development where platformOrigin is http://127.0.0.1:13090.
-  assert.match(accountRow, /platformOrigin: !!js process\.env\.DSH_PLATFORM_ORIGIN/);
-  assert.match(accountRow, /allowLoopbackHttp:/);
+  assert.match(text, /platformOrigin: !!js process\.env\.DSH_PLATFORM_ORIGIN/);
+  assert.match(text, /allowLoopbackHttp:/);
   // The whole config must be restated: a patch replaces it, it does not merge.
   for (const key of ['desktopPlatform', 'inferenceOrigin', 'requestTimeoutMs', 'attemptTimeoutMs']) {
-    assert.match(accountRow, new RegExp(`^\\s*${key}:`, 'm'), `config must restate ${key}`);
+    assert.match(text, new RegExp(`^ {4}${key}:`, 'm'), `config must restate ${key}`);
   }
 });
 
-test('the shipped cordis.patch.yml mounts the fork-owned host-auth plugin', () => {
+/**
+ * The row this file must **not** carry any more.
+ *
+ * A bare `insert` of our plugin made it a Loader row with no package: measured on
+ * the live desktop Host, `listPlugins` could address it (`patchId:
+ * dsharness-host-auth`) while `listBundles` knew nothing about it, so the official
+ * Plugins page had no card to switch. The ask is precisely that such a card
+ * exists, so the plugin ships as a bundle package instead.
+ */
+test('the shipped cordis.patch.yml inserts no fork-owned plugin row', () => {
   const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
-  // It must be an insert: upstream has no such row, so an insert cannot conflict
-  // with anything upstream declares.
-  assert.match(text, /^- insert:$/m);
-  assert.match(text, /- id: dsharness-host-auth$/m);
-  // The installed file name, which is what installInto copies into $DSH_HOME.
-  const installed = PLUGIN_FILES.map(([, target]) => target);
-  for (const target of installed) {
-    assert.ok(text.includes(`name: ./${target}`), `row must mount ./${target}`);
+  assert.ok(!/^ {4}- id: dsharness-/m.test(text), 'no fork-owned insert may remain');
+  assert.ok(!/^insert:$/m.test(text), 'the whole file is config overrides only');
+  for (const plugin of PROFILE_PLUGINS) {
+    assert.ok(!text.includes(`\n    - id: ${plugin.name}\n`), `${plugin.name} must not be inserted here`);
   }
-  // The secret is read from the environment; it must never be written into the repo.
-  assert.match(text, /token: !!js process\.env\.DSH_AUTH_TOKEN \?\? ''/);
+  // The secret is read from the environment and must never be written into the repo.
   assert.ok(!/token:\s*['"]?[A-Za-z0-9_-]{16,}/.test(text), 'no literal secret may appear in the shipped rows');
 });
 
-test('installInto: copies every plugin beside the patch and drops the rows in', () => {
+/**
+ * A default state must never live in this layer.
+ *
+ * Measured with the real `applyEntryPatches`, this file is applied **after** the
+ * profile's own patch, so a `disabled` here would be the last word: the Plugins
+ * page's `setPluginEnabled` writes into the profile layer, and the switch would
+ * appear to do nothing.
+ */
+test('the shipped cordis.patch.yml states no default enablement', () => {
+  const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
+  assert.ok(!/^\s*disabled:/m.test(text), 'enablement belongs to the bundle selection, not this layer');
+});
+
+test('installInto: writes the rows and provisions the profile plugins', () => {
   const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
   try {
     const block = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
-    const { target, installed } = installInto(home, block);
+    const { target, reports } = installInto(home, block, noPnpm);
     assert.equal(target, join(home, 'cordis.patch.yml'));
-    assert.deepEqual(installed, PLUGIN_FILES.map(([, name]) => name));
-    for (const [, fileName] of PLUGIN_FILES) {
-      const copy = join(home, fileName);
-      assert.ok(existsSync(copy), `${fileName} must land beside the patch file`);
-      // Byte-identical: the copy is a deployment artifact, not an edit surface.
-      assert.equal(readFileSync(copy, 'utf8'), readFileSync(join(here, fileName.replace('dsharness-', '')), 'utf8'));
-    }
     assert.match(readFileSync(target, 'utf8'), /# >>> dsharness platform rows/);
+    // No profile yet: nothing to provision, and nothing invented.
+    assert.deepEqual(reports, []);
+    assert.equal(existsSync(join(home, 'profiles')), false);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test('installInto: rerunning is idempotent and cannot accumulate copies', () => {
+test('installInto: rerunning is idempotent and leaves no stray files', () => {
   const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
   try {
     const block = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
-    installInto(home, block);
+    installInto(home, block, noPnpm);
     const once = readFileSync(join(home, 'cordis.patch.yml'), 'utf8');
-    installInto(home, block);
+    installInto(home, block, noPnpm);
     assert.equal(readFileSync(join(home, 'cordis.patch.yml'), 'utf8'), once);
-    assert.equal(readdirSync(home).length, PLUGIN_FILES.length + 1, 'no stray copies');
+    assert.deepEqual(readdirSync(home), ['cordis.patch.yml'], 'the patch file is the only artifact here');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -150,7 +167,7 @@ test('installInto: an operator row outside the block survives, and last-write-wi
   const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
   try {
     writeFileSync(join(home, 'cordis.patch.yml'), '- id: tool-ralph\n  disabled: false\n', 'utf8');
-    installInto(home, '- id: deepseek-account\n  config: {}\n');
+    installInto(home, '- id: deepseek-account\n  config: {}\n', noPnpm);
     const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8');
     assert.ok(text.startsWith('- id: tool-ralph'), 'the operator row must survive verbatim');
     assert.ok(text.indexOf('tool-ralph') < text.indexOf('dsharness platform rows (managed'));
@@ -159,18 +176,43 @@ test('installInto: an operator row outside the block survives, and last-write-wi
   }
 });
 
-test('removeFrom: takes back both the rows and the copies this script owns', () => {
+test('removeFrom: takes back the rows and leaves operator content alone', () => {
   const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
   try {
     writeFileSync(join(home, 'cordis.patch.yml'), '- id: tool-ralph\n  disabled: false\n', 'utf8');
-    installInto(home, readFileSync(join(here, 'cordis.patch.yml'), 'utf8'));
-    removeFrom(home);
+    installInto(home, readFileSync(join(here, 'cordis.patch.yml'), 'utf8'), noPnpm);
+    const { reports } = removeFrom(home, { profiles: [] });
     const text = readFileSync(join(home, 'cordis.patch.yml'), 'utf8');
     assert.ok(text.includes('tool-ralph'), 'operator rows must not be removed with ours');
     assert.ok(!text.includes('dsharness platform rows (managed'), 'our block must be gone');
-    for (const [, fileName] of PLUGIN_FILES) {
-      assert.equal(existsSync(join(home, fileName)), false, `${fileName} must be removed`);
-    }
+    assert.deepEqual(reports, [], 'no profile was named, so nothing to unprovision');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('removeFrom: unprovisions every profile it finds', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsharness-install-'));
+  try {
+    installInto(home, readFileSync(join(here, 'cordis.patch.yml'), 'utf8'), noPnpm);
+    // A profile that our provisioning has already touched.
+    const profileDir = join(home, 'profiles', 'probe');
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: { [PROFILE_PLUGINS[0].name]: 'file:./node_modules/x' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dshmarket'] } },
+    }, undefined, 2)}\n`, 'utf8');
+    mkdirSync(join(profileDir, 'node_modules', PROFILE_PLUGINS[0].name), { recursive: true });
+    const { reports } = removeFrom(home);
+    assert.deepEqual(reports.map((report) => report.profile), ['probe']);
+    assert.deepEqual(reports[0].removed, [PROFILE_PLUGINS[0].name]);
+    const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+    assert.ok(!Object.hasOwn(manifest.dependencies, PROFILE_PLUGINS[0].name), 'our dependency is gone');
+    assert.ok(!manifest.dsh.profile.bundles.includes(MARKETPLACE_PACKAGE), 'our selection is gone');
+    assert.ok(manifest.dsh.profile.bundles.includes('@deepseek-ai/dsh-base'), 'the person\'s own bundles stay');
+    assert.equal(existsSync(join(profileDir, 'node_modules', PROFILE_PLUGINS[0].name)), false);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
