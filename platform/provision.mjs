@@ -513,23 +513,8 @@ function main() {
     process.stdout.write(`[platform] no profile under ${join(home, 'profiles')}; nothing to provision\n`);
     return;
   }
-  for (const report of provisionAll(home, { profiles, withMarketplace, write: !dryRun })) {
-    if (report.status === 'skipped') {
-      process.stdout.write(`[platform] ${report.profile}: ${report.reason}\n`);
-      continue;
-    }
-    const state = PROFILE_PLUGINS.map(
-      (plugin) => `${plugin.name} (${plugin.defaultEnabled === true ? 'on' : 'off'} by default)`,
-    ).join(', ');
-    if (dryRun) {
-      const what = report.install.map((entry) => entry.name).join(', ') || 'nothing';
-      process.stdout.write(`[platform] ${report.profile}: ${state}; would install ${what}\n`);
-      continue;
-    }
-    process.stdout.write(
-      `[platform] ${report.profile}: ${state}${installedNote(report.installed)}${failNote(report.failures, report.profile)}\n`,
-    );
-  }
+  const reports = provisionAll(home, { profiles, withMarketplace, write: !dryRun });
+  for (const line of describeReports(reports, dryRun)) process.stdout.write(`${line}\n`);
   if (!withMarketplace) process.stdout.write('[platform] marketplace left alone (--no-marketplace)\n');
 }
 
@@ -541,6 +526,33 @@ function installedNote(installed) {
   if (ours.length > 0) parts.push(`installed ${ours.join(', ')}`);
   if (marketplace) parts.push(`installed ${MARKETPLACE_PACKAGE} and selected it`);
   return parts.length === 0 ? '' : `; ${parts.join('; ')}`;
+}
+
+/**
+ * One report line per profile, for both the standalone script and `install.mjs`.
+ *
+ * The same wording in both places on purpose: an operator reading `install.mjs`
+ * output should not have to know that a second script did the plugin work.
+ *
+ * @param reports - reports from {@link provisionAll}.
+ * @param dryRun - whether the run only planned.
+ * @returns printable lines.
+ */
+export function describeReports(reports, dryRun = false) {
+  return reports.map((report) => {
+    if (report.status === 'skipped') return `[platform] ${report.profile}: ${report.reason}`;
+    const state = PROFILE_PLUGINS.map(
+      (plugin) => `${plugin.name} (${plugin.defaultEnabled === true ? 'on' : 'off'} by default)`,
+    ).join(', ');
+    if (dryRun) {
+      // `link` is what we generate and `add` is what a registry has to serve.
+      const generate = (report.link ?? []).map((entry) => entry.name);
+      const fetch = (report.add ?? []).map((entry) => entry.name);
+      const what = [...generate, ...fetch].join(', ') || 'nothing';
+      return `[platform] ${report.profile}: ${state}; would install ${what}`;
+    }
+    return `[platform] ${report.profile}: ${state}${installedNote(report.installed)}${failNote(report.failures, report.profile)}`;
+  });
 }
 
 /** One clause naming a failed install and the exact manual command. */

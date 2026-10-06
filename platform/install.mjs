@@ -46,7 +46,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveDshHome } from './home.mjs';
-import { provisionAll, unprovisionProfile } from './provision.mjs';
+import { describeReports, provisionAll, unprovisionProfile } from './provision.mjs';
 
 const BEGIN = '# >>> dsharness platform rows (managed by platform/install.mjs)';
 const END = '# <<< dsharness platform rows';
@@ -155,37 +155,19 @@ function main() {
 
   const origin = String(process.env.DSH_PLATFORM_ORIGIN || '').trim() || 'http://127.0.0.1:13090';
   const token = String(process.env.DSH_AUTH_TOKEN || '').trim();
-  process.stdout.write(`[platform] wrote ${target}\n`);
+  /*
+   * The managed rows are written even under `--check`: the merge is idempotent, so
+   * an unchanged file stays byte-identical. The word still has to be honest, since
+   * that write is the one thing a dry run does do.
+   */
+  process.stdout.write(`[platform] ${dryRun ? 'would write' : 'wrote'} ${target}\n`);
   process.stdout.write('[platform] managed rows: deepseek-account (config only)\n');
-  for (const line of describeReports(reports)) process.stdout.write(`${line}\n`);
+  for (const line of describeReports(reports, dryRun)) process.stdout.write(`${line}\n`);
   process.stdout.write(`[platform] account origin: ${origin}\n`);
   // Never print the secret itself, only whether one is present.
   process.stdout.write(
     `[platform] host auth token: ${token.length >= 16 ? `configured (${token.length} chars)` : 'NOT configured (Set DSH_AUTH_TOKEN; the plugin stays usable but does nothing)'}\n`,
   );
-}
-
-/**
- * Render one provisioning report per profile as human-readable lines.
- *
- * Re-exported shape kept local: `main` is the only caller, and the spec asserts
- * through {@link provisionAll} instead.
- *
- * @param reports - reports from {@link provisionAll}.
- * @returns printable lines.
- */
-function describeReports(reports) {
-  return reports.map((report) => {
-    const detail = report.status === 'ok' || report.status === 'partial'
-      ? `${(report.installed ?? []).length === 0 ? 'plugins already installed' : `installed ${report.installed.join(', ')}`}`
-      : report.status === 'planned'
-        ? `would install ${report.install.map((entry) => entry.name).join(', ') || 'nothing'}`
-        : report.reason;
-    const failures = (report.failures ?? []).map(
-      (failure) => `\n[platform]   NOT installed: ${failure.what}\n[platform]   reason: ${failure.reason}`,
-    ).join('');
-    return `[platform] ${report.profile}: ${detail}${failures}`;
-  });
 }
 
 // Only run when invoked directly; the exports above exist for the spec.
