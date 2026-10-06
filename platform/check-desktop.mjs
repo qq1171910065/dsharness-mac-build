@@ -65,6 +65,25 @@ function check(name, ok, detail = '') {
   console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+/**
+ * 截图 —— **失败不算检查失败**。
+ *
+ * CDP 的 `Page.captureScreenshot` 在 Electron 窗口被遮挡/最小化，或刚开过原生
+ * `WebContentsView` 之后会超时（实测踩到：脚本跑到一半整个挂掉，而它验的东西
+ * 全都已经通过了）。截图是给人看的证据，不是验收条件，所以这里吞掉错误并说明。
+ *
+ * @param target - 要截的页面。
+ * @param file - 输出文件名（落在 `SHOTS`）。
+ */
+async function shot(target, file) {
+  try {
+    await target.screenshot({ path: join(SHOTS, file), timeout: 10_000 });
+    console.log(`  [shot] ${file}`);
+  } catch (error) {
+    console.log(`  [shot] ${file} 跳过（截图超时，不影响结论）：${String(error).split('\n')[0]}`);
+  }
+}
+
 /** playwright-core 只在 client 的 pnpm store 里（apps/web 的 devDependency 未提升）。 */
 async function loadChromium() {
   const store = resolve(CLIENT_DIR, 'node_modules', '.pnpm');
@@ -76,14 +95,18 @@ async function loadChromium() {
 /** 用既有的本地用户签一份会话（不发邮件），拿到 token。 */
 function mintSession() {
   /*
-   * 走 server 自己那个 CLI 入口（`node scripts/local-session.mjs`）而不是
-   * 内联 tsx 参数：入口是稳定的，加载器怎么配是那边的实现细节。
-   * Windows 上用 `npx.cmd`，避免 `shell: true` 的转义与弃用告警。
+   * 直接调 tsx 的 CLI 入口，不走 `npx`：
+   *
+   * - `npx` 在 Windows 上是 `npx.cmd`，而新版 Node 的 `execFileSync` 对 `.cmd`
+   *   会抛 `spawnSync npx.cmd EINVAL`（实测踩到）；
+   * - 加 `shell: true` 能绕开，但那样参数要自己转义，还会报弃用告警。
+   *
+   * `node <tsx>/dist/cli.mjs <script>` 是最短且无 shell 的那条路。
    */
-  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const output = execFileSync(npx, ['tsx', 'scripts/local-session.mjs', '--email', EMAIL], {
-    cwd: SERVER_DIR, encoding: 'utf8',
-  });
+  const tsxCli = resolve(SERVER_DIR, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const output = execFileSync(process.execPath, [
+    tsxCli, 'scripts/local-session.mjs', '--email', EMAIL,
+  ], { cwd: SERVER_DIR, encoding: 'utf8' });
   return JSON.parse(output);
 }
 
@@ -152,17 +175,41 @@ check('两个跳转链接指向本产品 server（而不是 platform.deepseek.co
   view.links.usageUrl.includes('13090') && view.links.topUpUrl.includes('13090'),
   `${view.links.usageUrl} / ${view.links.topUpUrl}`);
 console.log(`  账号状态: ${view.status}  attempt=${view.attempt?.phase ?? 'null'}`);
-await page.screenshot({ path: join(SHOTS, 'desktop-01-chat.png') });
+await shot(page, 'desktop-01-chat.png');
 
-/* 官方那两个链接必须真的可解析（302 到网关），否则账号页点它们是 404 */
+/*
+ * 官方那两个链接必须是**本服务自己渲染的页面**，不能是重定向：
+ * 桌面端用同源内嵌视图打开它们，而那个视图的 `will-redirect` 只放行
+ * `account.origin`（`apps/desktop/src/platform-view.ts`）——
+ * 一旦 302 出去，跳转被取消，用户看到空白（这就是「充值没法用」的真因）。
+ */
 for (const key of ['usageUrl', 'topUpUrl']) {
   const response = await contexts[0].request.get(view.links[key], { maxRedirects: 0 });
-  check(`账号页链接 ${key} 不是 404`, response.status() === 302, `status=${String(response.status())}`);
+  const body = await response.text();
+  const expected = key === 'usageUrl' ? 'data-page="usage"' : 'data-page="top_up"';
+  check(`账号页链接 ${key} 由本产品渲染且不跳转`,
+    response.status() === 200 && body.includes(expected),
+    `status=${String(response.status())} location=${String(response.headers().location ?? '(none)')}`);
 }
 
 const identity = { version: '0.2.1-alpha.1', locale: 'zh-CN', timezoneOffsetSeconds: 28800 };
 
-if (view.status !== 'credential-stored' && EMAIL !== '') {
+/*
+ * 「已登录但读不出东西」= 凭据已失效（**不是**读失败）。
+ *
+ * 官方退登落在 `bumpTokenVersion` 上，该用户**所有**既有会话立刻作废；
+ * 桌面端会把状态留在 `credential-stored`，但 `getProfile` 回 `value: null`。
+ * 之前刚跑过 `server; npm run e2e`（它最后一步就是 signOut）就会这样。
+ * 那种情况下要**重新登录**，而不是把断言改成失败 —— 状态本身没有坏。
+ */
+let credentialStale = false;
+if (view.status === 'credential-stored') {
+  const probe = await call('account/getProfile', { client: identity });
+  credentialStale = probe.value?.status !== 'ready' && probe.value?.value === null;
+  if (credentialStale) console.log('[NOTE] 已有凭据已失效（多半是之前跑过 e2e 的 signOut）→ 重新登录一次');
+}
+
+if ((view.status !== 'credential-stored' || credentialStale) && EMAIL !== '') {
   /*
    * 桌面壳未登录时会**自己**发起登录（引导页），这本身就是「官方所有登录
    * 都对接 Platform」在桌面端最强的一条证据：authorizeUrl 必须指向本产品
@@ -184,7 +231,7 @@ if (view.status !== 'credential-stored' && EMAIL !== '') {
   const authorizeUrl = String(view.attempt?.authorizeUrl ?? '');
   check('桌面端发起的登录指向本产品 server',
     authorizeUrl.startsWith('http://127.0.0.1:13090/dsh/authorize'), authorizeUrl);
-  await page.screenshot({ path: join(SHOTS, 'desktop-02-signin-dialog.png') });
+  await shot(page, 'desktop-02-signin-dialog.png');
 
   if (authorizeUrl === '') {
     console.log(`[SKIP] 登录段：没拿到 authorizeUrl（phase=${String(view.attempt?.phase)}）`);
@@ -392,7 +439,7 @@ await page.evaluate(() => {
   hit?.click()
 });
 await page.waitForTimeout(3000);
-await page.screenshot({ path: join(SHOTS, 'desktop-03-account-balance.png') });
+await shot(page, 'desktop-03-account-balance.png');
 const panel = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
 check('账号页在桌面壳里渲染出来了', /账号与余额|充值余额|赠金余额/.test(panel), panel.slice(-180));
 check('面板里没有旧壳的用量/费用统计', !/用量与花费|费用统计/.test(panel));

@@ -40,6 +40,7 @@ platform/
   host-auth.test.mjs       the plugin's pure functions (18 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
+  check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
@@ -127,6 +128,19 @@ $env:DSH_AUTH_TOKEN='<the same secret>'; node platform/check-host-auth.mjs
 ```
 
 本机实测：无凭证 / 错密钥 / 过短密钥一律 401；正确密钥进得了真实 RPC 面（`result.ok: true`）；登录页发的 cookie 同样能过；`/` 无凭证 401、带 cookie 200；mux 升级握手通过并收到数据帧。
+
+### 账号页那两个链接必须由本产品渲染
+
+官方 provider 把账号页的用量与充值链接生成成 `<platformOrigin>/usage` 与 `<platformOrigin>/top_up`（`deepseek-account-platform/src/index.ts:188`），而**桌面端用同源 `WebContentsView` 打开它们**，那个视图的导航守卫是：
+
+```js
+const allowNavigation = (url) => new URL(url).origin === account.origin
+view.webContents.on('will-redirect', (event, url) => { if (!allowNavigation(url)) event.preventDefault() })
+```
+
+所以任何跳出 `platformOrigin` 的重定向都会**被取消**，用户看到一块空白。这正是「点充值没反应」的真因：这两条路径曾经 302 到 `ai.czmanong.com`。它们必须由本产品自己渲染 —— 见 `server/src/lib/page-shell.ts`、`topup-page.ts`、`usage-page.ts`、`page-session.ts` 与 `server/src/routes/pages.ts`。
+
+`check-pages.mjs` 走的就是内嵌视图那条路：注入 `window.dsh.getAuthToken()`（官方 preload 暴露的桥）并且**刻意不种 cookie**，这样它不会不小心测成浏览器那条路。请在 `npm run e2e` 之后跑它 —— e2e 最后一步的退登会作废所有既有会话。
 
 ### 桌面端（Electron）是同一个面
 

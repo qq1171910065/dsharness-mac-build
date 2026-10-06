@@ -40,6 +40,7 @@ platform/
   host-auth.test.mjs       the plugin's pure functions (18 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
+  check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
@@ -134,6 +135,19 @@ $env:DSH_AUTH_TOKEN='<the same secret>'; node platform/check-host-auth.mjs
 ```
 
 Verified locally: no credential / wrong secret / short secret all 401; the correct secret reaches the real RPC surface (`result.ok: true`); the login page issues a cookie that also passes; `/` is 401 without and 200 with; the mux upgrade opens and delivers a frame.
+
+### The account page's two links must be rendered by this product
+
+The official provider builds the account page's usage and top-up links as `<platformOrigin>/usage` and `<platformOrigin>/top_up` (`deepseek-account-platform/src/index.ts:188`), and **Desktop opens them in a same-origin `WebContentsView`** whose navigation guard is:
+
+```js
+const allowNavigation = (url) => new URL(url).origin === account.origin
+view.webContents.on('will-redirect', (event, url) => { if (!allowNavigation(url)) event.preventDefault() })
+```
+
+So a redirect out of `platformOrigin` is **cancelled** and the user sees a blank surface. That is exactly why "the top-up button does nothing": those two paths used to `302` to `ai.czmanong.com`. They must be rendered by this product instead — see `server/src/lib/page-shell.ts`, `topup-page.ts`, `usage-page.ts`, `page-session.ts` and `server/src/routes/pages.ts`.
+
+`check-pages.mjs` exercises the path the embedded view takes: it injects `window.dsh.getAuthToken()` (the bridge the official preload exposes) and deliberately sets **no cookie**, so it cannot accidentally test the browser route instead. Run it after `npm run e2e`, which ends with a sign-out that revokes every existing session.
 
 ### Desktop (Electron) is the same surface
 
