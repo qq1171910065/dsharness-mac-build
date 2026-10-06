@@ -39,6 +39,7 @@ platform/
   install.test.mjs         the merge and copy rules (12 cases)
   host-auth.test.mjs       the plugin's pure functions (18 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
+  check-desktop.mjs        live check against the real Electron renderer (CDP)
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
@@ -133,6 +134,38 @@ $env:DSH_AUTH_TOKEN='<the same secret>'; node platform/check-host-auth.mjs
 ```
 
 Verified locally: no credential / wrong secret / short secret all 401; the correct secret reaches the real RPC surface (`result.ok: true`); the login page issues a cookie that also passes; `/` is 401 without and 200 with; the mux upgrade opens and delivers a frame.
+
+### Desktop (Electron) is the same surface
+
+The Desktop application launches the same web composition: `apps/desktop-host/src/index.ts` boots `webServer` + `connection` and Electron only owns the window. Because `install.mjs` writes the rows to `$DSH_HOME/cordis.patch.yml`, which **every** profile reads, the Desktop profile needs no extra work to get both the account row and the host-auth channel.
+
+`check-desktop.mjs` verifies that against the real renderer over CDP (Electron is started with `--remote-debugging-port=9222` by `apps/desktop/scripts/dev.ts`):
+
+```powershell
+# one terminal
+cd server; npm run dev
+# another
+cd client
+$env:DSH_HOME="$env:TEMP\dsh-desktop-dev"
+$env:DSH_PLATFORM_ORIGIN='http://127.0.0.1:13090'
+$env:DSH_AUTH_TOKEN='<at least 16 chars>'
+node platform/install.mjs
+Remove-Item Env:\ELECTRON_RUN_AS_NODE      # see below, this matters
+pnpm run start:desktop
+# a third
+$env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-desktop.mjs
+```
+
+It asserts what the Web check cannot: the Desktop shell injects `dshDesktop` **itself** (with `browser`, `deviceInfo`, `keyboard`, `shortcuts`, `updates`), so the account UI is the real one rather than a fixture; the official sign-in points at this product's server; the callback is accepted; `getProfile`/`getBalance` return this product's data; and the account page renders the balance.
+
+Four things that cost time and are worth knowing before writing against this surface:
+
+| symptom | cause |
+|---------|-------|
+| `electron.exe: bad option: --remote-debugging-port=…` | `ELECTRON_RUN_AS_NODE=1` is inherited when you launch from inside DSH; clear it |
+| `Target.createTarget: Not supported` | CDP does not support `context.newPage()`; drive the existing page and use HTTP for extra steps |
+| a visible button reads as "not visible" | the overlays are `position: fixed`, so `offsetParent` is always null; `checkVisibility({checkOpacity,checkVisibilityCSS})` also returns false here. Use geometry |
+| the account section never appears | the sidebar trigger's text is the **user name**, and the menu item's text is `设置Ctrl+,`; select by `button[aria-label="账号菜单"]` then `[role=menuitem]`. The official onboarding overlay also has to be dismissed first (loop it, preferring the confirmation dialog's own keys) |
 
 ## What it changes
 

@@ -39,6 +39,7 @@ platform/
   install.test.mjs         the merge and copy rules (12 cases)
   host-auth.test.mjs       the plugin's pure functions (18 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
+  check-desktop.mjs        live check against the real Electron renderer (CDP)
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
@@ -126,6 +127,38 @@ $env:DSH_AUTH_TOKEN='<the same secret>'; node platform/check-host-auth.mjs
 ```
 
 本机实测：无凭证 / 错密钥 / 过短密钥一律 401；正确密钥进得了真实 RPC 面（`result.ok: true`）；登录页发的 cookie 同样能过；`/` 无凭证 401、带 cookie 200；mux 升级握手通过并收到数据帧。
+
+### 桌面端（Electron）是同一个面
+
+桌面应用起的是**同一个 web 组合**：`apps/desktop-host/src/index.ts` 起 `webServer` + `connection`，Electron 只负责窗口。而 `install.mjs` 把行写进 `$DSH_HOME/cordis.patch.yml`，**每个** profile 都读它 —— 所以桌面 profile 不需要任何额外改动就同时拿到了账号行与 host-auth 通道。
+
+`check-desktop.mjs` 通过 CDP 对**真实渲染进程**验这件事（Electron 由 `apps/desktop/scripts/dev.ts` 带 `--remote-debugging-port=9222` 起）：
+
+```powershell
+# one terminal
+cd server; npm run dev
+# another
+cd client
+$env:DSH_HOME="$env:TEMP\dsh-desktop-dev"
+$env:DSH_PLATFORM_ORIGIN='http://127.0.0.1:13090'
+$env:DSH_AUTH_TOKEN='<at least 16 chars>'
+node platform/install.mjs
+Remove-Item Env:\ELECTRON_RUN_AS_NODE      # see below, this matters
+pnpm run start:desktop
+# a third
+$env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-desktop.mjs
+```
+
+它验的是 Web 那套验不到的：桌面壳**自己**注入 `dshDesktop`（含 `browser` / `deviceInfo` / `keyboard` / `shortcuts` / `updates`），所以账号 UI 是真实那一份而不是夹具；官方登录指向本产品 server；回调被接受；`getProfile` / `getBalance` 回的是本产品数据；账号页渲染出余额。
+
+四个耗过时间、值得先知道的坑：
+
+| 症状 | 原因 |
+|------|------|
+| `electron.exe: bad option: --remote-debugging-port=…` | 在 DSH 里面启动会继承 `ELECTRON_RUN_AS_NODE=1`；清掉它 |
+| `Target.createTarget: Not supported` | CDP 不支持 `context.newPage()`；驱动现有页面，额外步骤走 HTTP |
+| 明明可见的按钮被判成不可见 | 覆盖层是 `position: fixed`，`offsetParent` 恒为 null；`checkVisibility({checkOpacity,checkVisibilityCSS})` 在这里也返回 false。用几何尺寸 |
+| 账号分区怎么都出不来 | 侧栏触发器的文本是**用户名**，菜单项文本是 `设置Ctrl+,`；要按 `button[aria-label="账号菜单"]` → `[role=menuitem]` 选。另外官方的 onboarding 覆盖层得先退出（循环点，且优先点确认框自己的键） |
 
 ## 它改了什么
 
