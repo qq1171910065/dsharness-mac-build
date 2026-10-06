@@ -229,7 +229,6 @@ export function resolveConfig(config = {}) {
       ? Math.floor(Number(raw.cookieMaxAgeSec))
       : DEFAULT_MINT_MAX_AGE_SEC,
     loginPage: raw.loginPage !== false,
-    loopbackBypass: raw.loopbackBypass !== false,
   }
 }
 

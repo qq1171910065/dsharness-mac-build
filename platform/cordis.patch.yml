@@ -62,5 +62,4 @@
         # 留空即未配置；插件自己的 resolveConfig 会退化为「什么都不做」并记一条 warn。
         token: !!js process.env.DSH_AUTH_TOKEN ?? ''
         cookieName: dsharness_auth
-        loopbackBypass: true
         loginPage: true
