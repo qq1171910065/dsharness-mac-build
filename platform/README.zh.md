@@ -38,6 +38,8 @@ platform/
   provision.mjs            install this product's plugins in the shape the Plugins page can switch
   model-key.mjs            fork-owned plugin: fetch this account's gateway key into the credentials
   update.mjs               fork-owned plugin: show the installed vs published version
+  update-ui.js             fork-owned browser half: the Settings row that opens the Desktop update dialog
+  update-ui.host.mjs       its no-op host half (a bundle row needs one; the browser half is a classic script)
   host-auth.mjs            fork-owned plugin: shared-secret access to the official /api,
                            and the /dsharness/gateway page with the port and the secret
   home.mjs                 the $DSH_HOME resolution both scripts share
@@ -47,6 +49,7 @@ platform/
   provision.test.mjs       the plugin provisioning policy
   model-key.test.mjs       the key delivery plugin (20 cases)
   update.test.mjs          version comparison and the update surface (12 cases)
+  update-ui.test.mjs       the in-app update row: the evaluated bundle, its registration, degradation
   host-auth.test.mjs       the gateway plugin's pure functions and its pages
   deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
@@ -59,6 +62,7 @@ platform/
     electron-builder-config.mjs the upstream configuration with one field replaced
     nsis-config-hook.mjs        the NODE_OPTIONS preload that substitutes it
     installer.nsh               the NSIS include: upstream first, then our hook
+    app-update.yml              the update feed descriptor the installer drops into resources
     deploy/                     the deployment layer exactly as installed (generated)
     verify-installer.mjs        re-wrap win-unpacked and prove the seam end to end
 ```
@@ -136,7 +140,9 @@ node platform/package-windows.mjs --check          # print the plan without buil
 
 `platform/windows/installer.nsh` 把 `platform/windows/deploy/` 拷进
 `<install>\resources\installer-ui\dsharness\`，再用**应用自带的** Node 运行时执行
-`deploy-entry.mjs` —— 不需要系统 Node、npm 或 pnpm。载荷由 `build-deploy-payload.mjs` 生成：
+`deploy-entry.mjs` —— 不需要系统 Node、npm 或 pnpm。它同时把
+`platform/windows/app-update.yml` 拷进 `<install>\resources`，那正是打包后的 updater 要找的位置
+（见下面的更新一节）。载荷由 `build-deploy-payload.mjs` 生成：
 `home.mjs` / `provision.mjs` / `install.mjs` / `host-auth.mjs` 与上层文件**逐字节相同**，
 `cordis.patch.yml` 是同一份行、**只改写一行** —— `platformOrigin` 烧成本次构建的地址，因为装好
 的机器上没有 `DSH_PLATFORM_ORIGIN`，而加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字
@@ -390,13 +396,29 @@ dsharness-relay:
 
 ### 检查更新（`update.mjs`）
 
-官方更新通道在未签名构建下用不了，而且不是配置问题：`publish: null`（`apps/desktop/scripts/electron-builder-config.mjs:249`）意味着 electron-builder **不写** `app-update.yml`（`app-builder-lib/out/publish/PublishManager.js:87-90`），而 `update-coordinator.ts:54` 正要求那个文件、`:185` 直接抛错。要恢复它得做代码签名，本产品没有证书。
+官方 updater 需要 `app-update.yml` 在应用的 resources 旁边，而未签名构建永远不会有它：`publish: null`（`apps/desktop/scripts/electron-builder-config.mjs:249`）让 electron-builder 不生成那个文件（`app-builder-lib/out/publish/PublishManager.js:87-90`），而 `update-coordinator.ts:54` 正要求它、`:185` 缺它就抛。安装器自己投放一份（`platform/windows/app-update.yml`）就成立，因为 `NsisUpdater.verifySignature()` 在 `publisherName` 缺席时返回 null —— 即**不做任何校验就接受**（`electron-updater/out/NsisUpdater.js:84-100`）。那个键是**故意不写**的：写了就会去跑真 Authenticode 校验，每次更新都以 `ERR_UPDATER_INVALID_SIGNATURE` 失败。
 
 所以 `platform/update.mjs` 自己给答案：`/dsharness/update`（HTML）与 `/dsharness/update.json`，拿已装版本与产品 server 在 `GET /api/config/version` 发布的版本比。它只**报告**，不下载也不安装。
 
 已装版本来自 `<DSH_HOME>/dsharness-install.json`，由载荷在安装期写下。安装器把 NSIS 的 `${VERSION}` 传进去 —— 那是 electron-builder 按打包版本定义的，而**未签名构建里只有安装器知道用户装的是哪一版**。
 
 ⚠️ 两份发布记录是**两个不同的存储**，两边都必须写：`wb_client_release`（Platform，官网渲染它）与产品 server 的 `desktopRelease`（客户端读它）。实测过的漂移就是 `register-client-release.mjs` 现在两边都写的原因：官网写着 `0.2.1-alpha.1.20261007.2`，而 `/api/config/version` 还在回 `0.2.0`，于是刚装好的客户端被告知「已是最新」。
+
+### 应用内的检查更新入口（`update-ui.js`）
+
+上面那一面回答的是「这是哪个版本」，它不是用户会去的地方。壳里其实已经暴露了**真正的应用内更新 UI** —— `dshDesktop.updates.open()`（`apps/desktop/src/preload-app.ts:49-57`，契约在 `ipc.ts:82-86`）会调 `main.ts` 的 `openUpdatePrompt()` 弹出原生的检查 / 下载 / 安装对话框 —— 但**出厂界面里没有任何东西调它**：唯一知道更新状态的那个组件（`DesktopUpdateIndicator.tsx:64`）在 idle 时什么都不渲染。所以在用户拿到的产品里，这个动作根本没有可点的路径；在 `packages/` 与 `apps/` 下搜 `updates.open`，命中的只有 preload、它的测试和那个指示器，没有任何入口。
+
+这就是这一层必须是**插件**而不是改上游的原因：`settings.general.item` 是上游公开的扩展位（声明在 `packages/client/ui-settings/src/client/contract/slots.ts:92`），一个注册者只需要一次 `slots.register`，而本 fork 的规矩是 `packages/` 与 `apps/` 一个字节都不碰。所以 `update-ui.js` 往「设置 › 通用」加一行，order 90（夹在 `developer-tools` 与 `current-version` 之间），按钮调 `globalThis.dshDesktop?.updates?.open()`，状态行把订阅到的 `status()` phase 说成人话。
+
+三个细节是刻意的，且都有 `update-ui.test.mjs` 的断言：
+
+- **bundle 是经典脚本，所以这个插件是两个文件。** 客户端模块系统用 `document.createElement('script')` 加载 bundle（`packages/client/modules/src/client/system.ts:16-29`），并按包名对账注册 `id`，所以 `update-ui.js` 只能通过 `window.__ModuleLoader__.load(...)` 注册自己，不可能是 ESM 插件；而 Node 那边 import 的是 bundle 行的 `index.mjs`。`update-ui.host.mjs` 就是那个空实现的宿主半，`provision.mjs` 的 `clientEntry` 字段把浏览器半拷成包内的 `client.js` —— 一个包要同时是 bundle 行**和**被服务的浏览器 bundle，两者都需要。
+- **这一行不需要任何上下文。** `settings.general.item` 的 owner props 是空的，而 `dsh-client-locale` 不在客户端 bundle 可 `require` 的 9 个基线模块里（`packages/client/web/src/platform.ts`），所以文案是内置的，按 `navigator.language`（退回 `<html lang>`）选中英。服务缺席时不会有任何东西消失 —— 这条路径上压根没有服务。
+- **浏览器里降级而不是报错。** 没有 `dshDesktop`（纯 `dsh web` profile）时这一行会说明原因并禁用按钮。
+
+`platform/windows/app-update.yml` 是同一功能的另一半，而且**刻意走两条路**：NSIS include 把它拷进 `$INSTDIR\resources`，让打包后的 updater 有 feed 可读；`windows/update-descriptor.mjs` 同时把它加进 electron-builder 的 `extraResources`，让它**在安装器跑之前就已经在包里**。第二条路存在的理由是实测出来的顺序问题：更新安装是静默 + 强启，assisted 安装器会在安装段结束时先重启应用（`app-builder-lib/templates/nsis/installSection.nsh:105-109`）—— 用 NSIS 顺序探针实测：重启那一刻描述文件还不存在，`.onInstSuccess` 紧接着才写入。只靠 include 的话，刚重启的那个实例会以 `enabled() === false`（`update-coordinator.ts:54`）做启动检查并报一次失败，之后重试才成功。所以 include 里的 `File` 是覆盖一份相同副本，而不是创造它。
+
+那个文件里的缓存目录名是与**安装器**的约定，不是随便起的标签：`updaterCacheDirName: '@deepseek-aidsh-desktop-updater'` 必须等于安装器算出来的值，因为卸载器删除的正是 `%LOCALAPPDATA%\<该名>`（`apps/desktop/installer/uninstall.nsh:34`），而 updater 会把约 292 MB 的未完成下载留在 `<该名>\pending`。该值来自 `appInfo.updaterCacheDirName`（`app-builder-lib/out/appInfo.js:126-128`，即 `sanitizedName.toLowerCase() + '-updater'`，`sanitizeFileName` 会保留 `@`），构建把它原样记成 `!define DSH_UPDATER_CACHE_NAME "@deepseek-aidsh-desktop-updater"` —— 在构建产物 `builder-debug.yml` 里实测得到。名字不一致不会让更新坏掉，只会在卸载时**静默留下**那笔下载，所以 `deploy-payload.test.mjs` 把它钉住了。引号是必需的：YAML 把行首的 `@` 当保留指示符。
 
 ### 客户端打包时写死的地址必须能直达本产品
 

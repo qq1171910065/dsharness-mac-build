@@ -10,6 +10,7 @@ import {
 } from './build-deploy-payload.mjs';
 import { parseArguments, hookEnvironment } from './package-windows.mjs';
 import { readConfigEnvironment, rewriteConfigArgument } from './windows/nsis-config-hook.mjs';
+import { withUpdateDescriptor, updateDescriptor, assertUpdateDescriptor } from './windows/update-descriptor.mjs';
 import { installInto } from './install.mjs';
 import {
   deploy, ensureDesktopProfile, PROFILE_BUNDLES, PROFILE_PATCH_TEMPLATE, PROFILE_PNPM_WORKSPACE, profilesUnder,
@@ -40,6 +41,7 @@ const clientDir = resolve(here, '..');
 const upstreamProfile = join(clientDir, 'packages', 'boot', 'app-boot', 'src', 'profile.ts');
 const windowsDir = join(here, 'windows');
 const installer = join(windowsDir, 'installer.nsh');
+const updateFeed = join(windowsDir, 'app-update.yml');
 
 function temporaryDirectory(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -150,12 +152,66 @@ test('installer include: opens with the upstream include and stays pure ASCII', 
     'NSIS forbids redefining an upstream macro');
 });
 
+test('installer include: ships the unsigned update feed beside the application resources', () => {
+  const text = readFileSync(installer, 'utf8');
+  // The file lands in `$INSTDIR\resources`, which is what `process.resourcesPath`
+  // means at runtime -- the exact directory `update-coordinator.ts:54` probes.
+  assert.match(text, /SetOutPath "\$INSTDIR\\resources"[\s\S]*?File "\$\{__FILEDIR__\}\\app-update\.yml"/u,
+    'the feed descriptor must be placed into the resources directory');
+  // `SetOutPath` is stateful, so the payload directory has to be selected again
+  // after it; otherwise later `File` statements embed into the wrong directory.
+  assert.match(text, /File "\$\{__FILEDIR__\}\\app-update\.yml"\s*\n\s*SetOutPath "\$INSTDIR\\resources\\installer-ui\\dsharness"/u,
+    'the output directory must be restored after shipping the feed descriptor');
+  // The feed descriptor deliberately does not go through `deploy/`.
+  assert.ok(!PAYLOAD_MODULES.includes('app-update.yml'), 'it is one file at a fixed location, not a generated payload module');
+
+  const feed = readFileSync(updateFeed, 'utf8');
+  assert.match(feed, /^provider: generic$/mu);
+  assert.match(feed, /^channel: nightly$/mu);
+  /*
+   * The cache directory name is a contract with the *installer*, not a free
+   * label. The uninstaller removes exactly `%LOCALAPPDATA%\<that name>`
+   * (`apps/desktop/installer/uninstall.nsh:34`), while the updater drops a
+   * ~292 MB pending download under `<that name>\pending`. The installer's value
+   * is `appInfo.updaterCacheDirName` (`app-builder-lib/out/appInfo.js:126-128`),
+   * and the build records it verbatim — measured in the built
+   * `builder-debug.yml` as `@deepseek-aidsh-desktop-updater`, `@` intact because
+   * `sanitizeFileName` keeps it. A mismatch does not break updating; it silently
+   * leaves the download behind on uninstall, which is exactly the kind of defect
+   * nobody reports. Quoted because YAML reserves a leading `@`.
+   */
+  assert.match(feed, /^updaterCacheDirName: '@deepseek-aidsh-desktop-updater'$/mu);
+  assert.doesNotMatch(feed, /^updaterCacheDirName: dsh-desktop-updater$/mu,
+    'a name the installer never removes leaves the pending download behind');
+  // A base URL without the trailing slash concatenates into a wrong artifact path.
+  const url = /^url:\s*(\S+)\s*$/mu.exec(feed)?.[1];
+  assert.ok(url !== undefined);
+  assert.ok(url.endsWith('/'), 'the update base URL must end with a slash');
+  assert.ok(url.startsWith('https://'));
+  /*
+   * The one key that must never come back. `NsisUpdater.verifySignature()`
+   * (`node_modules/electron-updater/out/NsisUpdater.js:84-100`) returns null --
+   * accepts the package -- exactly while `publisherName` is null or absent; the
+   * moment it is present, an unsigned build fails every update with
+   * `ERR_UPDATER_INVALID_SIGNATURE`. A regression here is silent until a user
+   * cannot update, so it is asserted rather than commented.
+   */
+  assert.doesNotMatch(feed, /^publisherName:/mu, 'an unsigned build cannot pass an Authenticode publisher check');
+  // The file is embedded by NSIS, so its own encoding rules apply too.
+  assert.equal(readFileSync(updateFeed).filter((byte) => byte > 0x7f).length, 0);
+});
+
 test('installer include: runs the deployment layer from the installed application', () => {
   const text = readFileSync(installer, 'utf8');
   assert.match(text, /^Function \.onInstSuccess$/mu);
   for (const file of [...PAYLOAD_MODULES, PAYLOAD_ENTRY, 'cordis.patch.yml']) {
     assert.ok(text.includes(`deploy\\${file}`), `the include must embed ${file}`);
   }
+  // The browser half of the settings entry travels with the payload like any
+  // other module: `provision.mjs` reads it from its own directory at install
+  // time, so an installer that omitted it would fail to create the bundle.
+  assert.ok(text.includes('deploy\\update-ui.js'), 'the include must embed the browser half');
+  assert.ok(text.includes('deploy\\update-ui.host.mjs'), 'the include must embed the host half');
   assert.match(text, /nsExec::ExecToLog '.*resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node\.exe.*deploy-entry\.mjs.*\$INSTDIR.*'/u);
   assert.match(text, /DetailPrint "DSH Desktop: deployment layer exited with \$0"/u);
   /*
@@ -300,6 +356,19 @@ test('deploy entry: writes the rows and provisions every profile, with an inject
     assert.ok(calls[0].args.includes('dshmarket'), 'the marketplace install is what makes the Plugins page work');
     // The generated bundle package is placed without a package manager, so it survives an offline install.
     assert.ok(existsSync(join(home, 'profiles', 'desktop', 'node_modules', 'dsharness-host-auth', 'index.mjs')));
+    /*
+     * The browser half travels with the payload too. `provision.mjs` reads
+     * `plugin.clientEntry` relative to its own directory, so an installed
+     * payload carrying only `update-ui.host.mjs` would fail to generate that
+     * package -- which is why both files are in PAYLOAD_MODULES and both are
+     * embedded by the NSIS include.
+     */
+    const clientHalf = join(home, 'profiles', 'desktop', 'node_modules', 'dsharness-update-ui');
+    assert.ok(existsSync(join(clientHalf, 'client.js')), 'the browser half must be generated by an installed payload');
+    assert.ok(existsSync(join(clientHalf, 'index.mjs')));
+    const installed = JSON.parse(readFileSync(join(clientHalf, 'package.json'), 'utf8'));
+    assert.equal(installed.dsh.client.platform, 'web');
+    assert.equal(installed.exports['./client'], './client.js');
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(install, { recursive: true, force: true });
@@ -374,6 +443,43 @@ test('package-windows: --registry reaches the prepare stage as npm_config_regist
   assert.equal(hookEnvironment('C:/x.mjs', parsed.registry).npm_config_registry, parsed.registry);
   // Omitted: nothing is set, so the ambient registry keeps working.
   assert.equal('npm_config_registry' in hookEnvironment('C:/x.mjs'), false);
+});
+
+/**
+ * The descriptor has to be inside the packaged resources, not only written by the
+ * installer.
+ *
+ * An update install is silent and force-run, so the assisted installer relaunches
+ * the application at the end of the install section
+ * (`app-builder-lib/templates/nsis/installSection.nsh:105-109`) — measured with an
+ * NSIS ordering probe to happen *before* `.onInstSuccess` writes `app-update.yml`.
+ * The relaunched instance therefore sees `enabled() === false`
+ * (`update-coordinator.ts:54`) and reports one spurious failure.
+ *
+ * The decision lives in `windows/update-descriptor.mjs` rather than in
+ * `windows/electron-builder-config.mjs` because importing the latter requires a
+ * release environment: it loads the upstream config, which throws
+ * `desktop release environment: DSH_DESKTOP_APP_ID must be set` without one.
+ */
+test('electron-builder config: the update descriptor is staged into the packaged resources', () => {
+  const upstreamResources = [
+    { from: 'C:/runtime', to: 'runtime' },
+    { from: 'C:/icon-windows.png', to: 'icon.png' },
+  ];
+  const combined = withUpdateDescriptor(upstreamResources);
+  assert.deepEqual(combined.slice(0, upstreamResources.length), upstreamResources,
+    'upstream resources must survive: they carry the Node runtime, the icon and the tray bitmap');
+  assert.deepEqual(combined.at(-1), { to: 'app-update.yml', from: updateDescriptor });
+  assert.notEqual(combined, upstreamResources, 'the input list must not be mutated in place');
+  // Undefined upstream list still yields the descriptor rather than throwing.
+  assert.deepEqual(withUpdateDescriptor(undefined).map((entry) => entry.to), ['app-update.yml']);
+  // Composing twice must not add a second entry for the same target directory.
+  assert.equal(withUpdateDescriptor(combined).filter((entry) => entry.to === 'app-update.yml').length, 1);
+
+  assert.ok(existsSync(updateDescriptor), 'the descriptor must exist at build time');
+  assertUpdateDescriptor(updateDescriptor);
+  assert.throws(() => assertUpdateDescriptor(join(windowsDir, 'no-such-descriptor.yml')),
+    /the packaged updater would have no feed descriptor/u);
 });
 
 test('upstream parity: the literal profile an install creates matches initProfile', () => {

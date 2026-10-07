@@ -1,0 +1,40 @@
+# Update feed for this product's unsigned Desktop build.
+#
+# Why this file exists at all: upstream's unsigned configuration sets
+# `publish: null` (apps/desktop/scripts/electron-builder-config.mjs:249), so
+# electron-builder writes no app-update.yml
+# (app-builder-lib/out/publish/PublishManager.js:87-90) -- and
+# update-coordinator.ts:54 requires exactly this file next to the resources,
+# while :185 throws "no packaged update source" without it. Shipping the feed
+# descriptor ourselves is what turns the packaged updater back on, and it is the
+# only change needed for that.
+#
+# Why there is deliberately NO `publisherName` key: electron-updater's
+# `NsisUpdater.verifySignature()`
+# (node_modules/electron-updater/out/NsisUpdater.js:84-100) reads
+# `publisherName` from the config and returns null -- i.e. accepts the package
+# without checking anything -- as soon as it is null or the value is absent;
+# it swallows ENOENT the same way. An unsigned build therefore installs fine.
+# Adding the key back would make it run a real Authenticode check and fail every
+# update with ERR_UPDATER_INVALID_SIGNATURE, so it must not be reintroduced.
+#
+# `url` must keep its trailing slash: electron-updater resolves the channel file
+# and the artifact names against this base (newBaseUrl normalizes only some
+# cases), and a missing slash concatenates into a wrong path.
+#
+# Why `updaterCacheDirName` is quoted and looks like this: it must equal what the
+# installer computes, because the uninstaller removes exactly
+# `%LOCALAPPDATA%\<that name>` (apps/desktop/installer/uninstall.nsh:34) while the
+# updater leaves a ~292 MB pending download in `<that name>\pending`. The
+# installer's value comes from `appInfo.updaterCacheDirName`
+# (`app-builder-lib/out/appInfo.js:126-128` = `sanitizedName.toLowerCase() +
+# '-updater'`, and `sanitizeFileName('@deepseek-ai/dsh-desktop')` keeps the `@`),
+# which the build records verbatim as
+# `!define DSH_UPDATER_CACHE_NAME "@deepseek-aidsh-desktop-updater"`
+# (measured in `builder-debug.yml`). Getting this wrong does not break updating --
+# it silently leaves the download behind on uninstall. The quoting is required:
+# YAML reads a leading `@` as a reserved indicator and refuses the line.
+provider: generic
+url: https://czmanong.oss-cn-beijing.aliyuncs.com/dsh-desktop/feeds/win-x64/
+updaterCacheDirName: '@deepseek-aidsh-desktop-updater'
+channel: nightly

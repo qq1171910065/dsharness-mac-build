@@ -57,7 +57,26 @@ Function .onInstSuccess
   File "${__FILEDIR__}\deploy\host-auth.mjs"
   File "${__FILEDIR__}\deploy\model-key.mjs"
   File "${__FILEDIR__}\deploy\update.mjs"
+  File "${__FILEDIR__}\deploy\update-ui.host.mjs"
+  File "${__FILEDIR__}\deploy\update-ui.js"
   File "${__FILEDIR__}\deploy\cordis.patch.yml"
+
+  ; The update feed descriptor, beside the application's resources.
+  ;
+  ; Deliberately NOT part of `deploy/`: it is one file at a fixed location that
+  ; electron-updater reads from `process.resourcesPath`, so generating it would
+  ; only add a thing that can drift. Upstream's unsigned configuration sets
+  ; `publish: null`, electron-builder writes no `app-update.yml`, and
+  ; `update-coordinator.ts:54` requires exactly this file -- without it the
+  ; packaged updater answers "no packaged update source".
+  ;
+  ; `SetOutPath` changes the current output directory, so it is restored
+  ; immediately: the statements after this block must land in the payload
+  ; directory again.
+  CreateDirectory "$INSTDIR\resources"
+  SetOutPath "$INSTDIR\resources"
+  File "${__FILEDIR__}\app-update.yml"
+  SetOutPath "$INSTDIR\resources\installer-ui\dsharness"
 
   ; The application ships its own Node runtime, so no system Node is required.
   ; The second argument is the version this installer was built as

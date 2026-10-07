@@ -49,8 +49,18 @@ const here = dirname(fileURLToPath(import.meta.url));
  */
 export const DEFAULT_PLATFORM_ORIGIN = 'https://www.czmanong.com';
 
-/** Payload modules copied verbatim from `platform/`. */
-export const PAYLOAD_MODULES = ['home.mjs', 'provision.mjs', 'install.mjs', 'host-auth.mjs', 'model-key.mjs', 'update.mjs'];
+/**
+ * Payload modules copied verbatim from `platform/`.
+ *
+ * Both halves of `dsharness-update-ui` are listed: `provision.mjs` generates its
+ * bundle package from `plugin.entry` / `plugin.clientEntry` **relative to its own
+ * directory** (`here` in `provision.mjs`), so an installed payload that carried
+ * only one of them would fail to provision that plugin.
+ */
+export const PAYLOAD_MODULES = [
+  'home.mjs', 'provision.mjs', 'install.mjs', 'host-auth.mjs', 'model-key.mjs', 'update.mjs',
+  'update-ui.js', 'update-ui.host.mjs',
+];
 
 /** The row file whose `platformOrigin` line the build rewrites. */
 const PATCH_SOURCE = 'cordis.patch.yml';

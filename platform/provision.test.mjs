@@ -45,11 +45,14 @@ const UPDATE = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-updat
 /** The gateway plugin: installed but NOT selected. */
 const GATEWAY = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-host-auth');
 
+/** The settings row that opens the Desktop update dialog: installed and selected. */
+const UPDATE_UI = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-update-ui');
+
 /** Every plugin this product generates locally, in shipped order. */
-const OWN_PLUGINS = [MODEL_KEY, UPDATE, GATEWAY];
+const OWN_PLUGINS = [MODEL_KEY, UPDATE, UPDATE_UI, GATEWAY];
 
 /** The plugins that start switched on. */
-const SELECTED_PLUGINS = [MODEL_KEY, UPDATE];
+const SELECTED_PLUGINS = [MODEL_KEY, UPDATE, UPDATE_UI];
 
 const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`, 'utf8');
 
@@ -86,9 +89,10 @@ test('planProvisioning: only the marketplace, the key plugin and the updater are
     plan.install.map((entry) => entry.name),
     [...OWN_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE],
   );
-  // The gateway plugin is installed but NOT selected (默认不启用); the other two must
-  // be selected: a model route whose credential is never delivered fails every
-  // request, and a check-for-updates page nobody can reach is not a feature.
+  // The gateway plugin is installed but NOT selected (默认不启用); the other three
+  // must be selected: a model route whose credential is never delivered fails every
+  // request, a check-for-updates page nobody can reach is not a feature, and a
+  // settings entry nobody switched on is invisible in the UI.
   assert.deepEqual(plan.select, [...SELECTED_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE]);
 });
 
@@ -200,6 +204,65 @@ test('writePluginPackage: a plugin with no config block gets a row without one',
   }
 });
 
+test('writePluginPackage: a browser half is declared with the two fields the roster reads', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
+  try {
+    const dir = writePluginPackage(join(root, 'pkg'), UPDATE_UI);
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    // `platform: 'web'` is the activation-scan filter; a misspelled subkey is not a
+    // warning anywhere (`parseDshClient` only ever reads `platform`), so the bundle
+    // would just never be served.
+    assert.equal(manifest.dsh.client.platform, 'web');
+    assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml', 'a browser half still needs a host half to be a bundle');
+    const clientRel = manifest.exports['./client'];
+    assert.equal(clientRel, './client.js');
+    // The export must point at a file that really landed there.
+    const clientPath = join(dir, clientRel);
+    assert.ok(existsSync(clientPath), './client must point at the packaged bundle');
+    assert.equal(
+      readFileSync(clientPath, 'utf8'),
+      readFileSync(join(import.meta.dirname, UPDATE_UI.clientEntry), 'utf8'),
+    );
+    // The module loader reconciles the registration `id` against the package name
+    // and drops the bundle when they disagree, so the literal is compared here.
+    const bundle = readFileSync(clientPath, 'utf8');
+    const id = /id:\s*'([^']+)'/.exec(bundle)?.[1];
+    assert.equal(id, UPDATE_UI.name);
+    // The classic-script bundle must not be the Loader entry: Node imports
+    // `index.mjs`, and a browser script cannot also be an ESM plugin.
+    assert.notEqual(UPDATE_UI.entry, UPDATE_UI.clientEntry);
+    assert.equal(manifest.main, './index.mjs');
+    assert.ok(!readFileSync(join(dir, 'index.mjs'), 'utf8').includes('__ModuleLoader__'));
+    // The generated manifest is read back on machines with a non-UTF-8 console and
+    // travel inside the NSIS payload; keeping the description ASCII avoids a
+    // mojibake'd card title that nothing would report as an error.
+    const written = readFileSync(join(dir, 'package.json'), 'utf8');
+    assert.ok(!written.includes('\\u'), 'JSON.stringify must not leave escape sequences behind');
+    assert.equal(Buffer.from(written, 'utf8').filter((byte) => byte > 0x7f).length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('writePluginPackage: a host-only plugin gains no client fields', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
+  try {
+    // The three plugins that predate the browser half must stay exactly as they
+    // were: no `dsh.client`, no `./client` export, no `client.js` in the package.
+    for (const plugin of [MODEL_KEY, UPDATE, GATEWAY]) {
+      const dir = writePluginPackage(join(root, plugin.name), plugin);
+      const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+      assert.equal('client' in manifest.dsh, false, `${plugin.name} declares no browser half`);
+      assert.equal('./client' in manifest.exports, false);
+      assert.deepEqual(Object.keys(manifest.exports), ['..', './cordis.patch.yml', './locale/*.json', './package.json']
+        .map((key) => (key === '..' ? '.' : key)));
+      assert.equal(existsSync(join(dir, 'client.js')), false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('provisionProfile: dry run writes no plugin package and runs no package manager', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
@@ -214,7 +277,7 @@ test('provisionProfile: dry run writes no plugin package and runs no package man
   }
 });
 
-test('provisionProfile: installs all four, selects the marketplace and the two on-by-default plugins', () => {
+test('provisionProfile: installs every shipped plugin, selects the marketplace and the on-by-default ones', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
     const dir = makeProfile(root, 'desktop');

@@ -21,8 +21,8 @@
   en: 149c857e5a9b5376
   zh: f43f5fddb25a3a1f
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-installer-already-carries-the-deployment-layer:
-  en: befe84a0ec234e8e
-  zh: 07f7ad71462d207b
+  en: 0bf847426a3b0709
+  zh: 018a3815cc3150f0
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/rows-here-can-mount-fork-owned-code:
   en: 3f3e7710c4f73ea0
   zh: fa5ae77c5c4c599d
@@ -63,8 +63,11 @@
   en: a886cae4d5e7895b
   zh: ad23ce125e314e87
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/check-for-updates-update-mjs:
-  en: 28dc902aa0abe164
-  zh: 237490523d26e9fb
+  en: 8379b29f7a2e9e2b
+  zh: b9352fc85be3e2c5
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-in-app-update-entry-update-ui-js:
+  en: 27444bed67b40925
+  zh: a2c1afefc5e8d4a4
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-origin-the-client-is-built-with-must-reach-this-product-directly:
   en: b572b1b36828f4bc
   zh: f67447aba8b5f26b

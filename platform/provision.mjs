@@ -120,6 +120,8 @@ export function pluginInstallSpec(name) {
  *
  * @property name - package name; the profile manifest's dependency key.
  * @property entry - single-file plugin in `platform/` that becomes `index.mjs`.
+ * @property clientEntry - optional browser half in `platform/`; becomes the
+ *   package's `client.js`, which is what `exports["./client"]` names.
  * @property rowId - the Loader row the package's patch inserts.
  * @property title - card title (`locale/en.json`), so the card is not the bare name.
  * @property description - card one-liner.
@@ -144,6 +146,29 @@ export const PROFILE_PLUGINS = [
     zhTitle: 'DSH Desktop 检查更新',
     description: 'Shows the installed version, the latest published one, and where to download it.',
     zhDescription: '显示当前版本、最新版本与下载地址（未签名安装包不能自动安装）。',
+    defaultEnabled: true,
+  },
+  {
+    name: 'dsharness-update-ui',
+    /*
+     * Two halves, two files, deliberately.
+     *
+     * The package must be a real Loader row to be a bundle at all, and the
+     * browser roster only scans rows with a live fiber
+     * (`packages/client/modules/src/index.ts:984` skips `entry.fiber === undefined`).
+     * But the browser half is a **classic script** — the client module system
+     * loads it with `document.createElement('script')`
+     * (`.../client/system.ts:16-29`) — so Node cannot `import()` it: it would hit
+     * a missing `window` on its first line. Hence the no-op host half is the
+     * entry (`index.mjs`) and the browser half rides along as `clientEntry`.
+     */
+    entry: 'update-ui.host.mjs',
+    clientEntry: 'update-ui.js',
+    rowId: 'dsharness-update-ui',
+    title: 'DSH Desktop in-app update entry',
+    zhTitle: 'DSH Desktop 应用内检查更新',
+    description: 'Adds a row to Settings General that opens the Desktop update dialog.',
+    zhDescription: '在「设置 › 通用」里放一行入口，打开桌面端的更新对话框（检查 / 下载 / 安装）。',
     defaultEnabled: true,
   },
   {
@@ -200,8 +225,24 @@ function pluginPatch(plugin) {
   return row.join('\n');
 }
 
-/** `package.json` for a generated plugin package. */
+/**
+ * `package.json` for a generated plugin package.
+ *
+ * A plugin with a browser half additionally declares the two fields the client
+ * roster reads: `exports["./client"]` (the bundle the shell serves, resolved by
+ * `clientExportOf` in `packages/client/modules/src/index.ts:195`) and
+ * `dsh.client.platform: 'web'` (the activation scan's filter, `:841`). The
+ * spellings matter and are the whole reason `dsh.client` exists here: a
+ * misspelled subkey is not a warning anywhere — `parseDshClient`
+ * (`.../modules/src/client/manifest.ts:161`) only ever looks at `platform`, and
+ * an unrecognized sibling is silently ignored, so the bundle would simply never
+ * be served and the row would render nothing.
+ *
+ * @param plugin - one {@link PROFILE_PLUGINS} entry.
+ * @returns the manifest file contents.
+ */
 function pluginManifest(plugin) {
+  const hasClient = plugin.clientEntry !== undefined;
   return `${JSON.stringify({
     name: plugin.name,
     version: '1.0.0',
@@ -209,9 +250,11 @@ function pluginManifest(plugin) {
     description: plugin.description,
     type: 'module',
     main: './index.mjs',
-    dsh: { bundle: { patch: './cordis.patch.yml' } },
+    ...hasClient ? { dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }
+      : { dsh: { bundle: { patch: './cordis.patch.yml' } } },
     exports: {
       '.': './index.mjs',
+      ...hasClient ? { './client': './client.js' } : {},
       './cordis.patch.yml': './cordis.patch.yml',
       './locale/*.json': './locale/*.json',
       './package.json': './package.json',
@@ -240,6 +283,12 @@ function pluginManifest(plugin) {
  * (`packages/boot/app-boot/src/index.ts:347`) — so the package can be moved or
  * copied without the row pointing anywhere else.
  *
+ * A plugin with a `clientEntry` additionally gets that file copied in as
+ * `client.js`, the name `exports["./client"]` declares. Copied, not linked, for
+ * the same reason as the host half: the installed package is self-contained and
+ * `platform/` stays the single place to edit. Plugins without a `clientEntry`
+ * (the three that predate this one) produce byte-identical output to before.
+ *
  * @param pluginDir - the destination package directory.
  * @param plugin - one {@link PROFILE_PLUGINS} entry.
  * @returns the package directory.
@@ -250,6 +299,11 @@ export function writePluginPackage(pluginDir, plugin) {
   const source = join(here, plugin.entry);
   if (!existsSync(source)) throw new Error(`missing ${source}`);
   cpSync(source, join(pluginDir, 'index.mjs'));
+  if (plugin.clientEntry !== undefined) {
+    const clientSource = join(here, plugin.clientEntry);
+    if (!existsSync(clientSource)) throw new Error(`missing ${clientSource}`);
+    cpSync(clientSource, join(pluginDir, 'client.js'));
+  }
   writeFileSync(join(pluginDir, 'cordis.patch.yml'), pluginPatch(plugin), 'utf8');
   writeFileSync(join(pluginDir, 'package.json'), pluginManifest(plugin), 'utf8');
   writeFileSync(
