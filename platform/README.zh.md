@@ -38,15 +38,24 @@ platform/
   provision.mjs            install this product's plugins in the shape the Plugins page can switch
   host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
   home.mjs                 the $DSH_HOME resolution both scripts share
+  build-deploy-payload.mjs assemble windows/deploy from the files above
+  package-windows.mjs      build this product's installer through the upstream packager
   install.test.mjs         the deployment rows (11 cases)
   provision.test.mjs       the plugin provisioning policy (16 cases)
   host-auth.test.mjs       the plugin's pure functions (18 cases)
+  deploy-payload.test.mjs  the installer seam: payload, include and profile parity (15 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
   verify-fork-update.mjs   prove the fork can still take upstream updates
   README.md
   README.zh.md
+  windows/
+    electron-builder-config.mjs the upstream configuration with one field replaced
+    nsis-config-hook.mjs        the NODE_OPTIONS preload that substitutes it
+    installer.nsh               the NSIS include: upstream first, then our hook
+    deploy/                     the deployment layer exactly as installed (generated)
+    verify-installer.mjs        re-wrap win-unpacked and prove the seam end to end
 ```
 
 ## 跟进上游
@@ -88,6 +97,84 @@ DOWNLOAD_TEST_RELEASE_ID=<32 hex characters>
 ```
 
 `test` 这套完全由环境变量驱动；`production` 那套不是 —— 所以在上游把它变成配置接缝之前，更新源只能通过 test 通道指向本产品。
+
+打包要走本层，不要直接调上游脚本：
+
+```sh
+node platform/package-windows.mjs --unsigned --build-version 0.2.1-alpha.1.20261007.1
+node platform/package-windows.mjs --check          # print the plan without building
+```
+
+上游打包器原样使用，本层从外面只加两件东西。
+
+**配置。** `apps/desktop/scripts/package-target.ts:269` 把
+`['exec','electron-builder','--config','electron-builder.config.mjs',…]` 写死，而它自己的
+`parseArgs` 会拒绝未声明的选项 —— 所以那条 `--config` 没法追加到打包命令上。整棵进程树确实
+会继承的是 `NODE_OPTIONS`，于是用 `--import platform/windows/nsis-config-hook.mjs` 预加载，
+只在「就是 electron-builder 本身」的那个进程里改这一个参数。钩子靠两个哨兵变量加
+`argv[1]` 是否指向 `electron-builder/cli.js` 自我约束，并且**替换不了就大声失败** ——
+用上游配置构建出来的安装包会静默地不含部署层，那比构建失败糟得多。
+
+`platform/windows/electron-builder-config.mjs` 就是它替换进去的东西：导入上游模块，只改一个
+字段。**导入上游的工厂函数**而不是把整份配置抄一遍，是为了上游新增选项时这里不会漏。
+
+**安装脚本。** `nsis.include` 指向 `platform/windows/installer.nsh`，它先
+`!include` 上游的 `apps/desktop/scripts/installer.nsh`（保住上游的自定义页面、分阶段解压与
+生命周期钩子），再加一个钩子。这个钩子必须是**标准回调** —— 上游把 `customHeader`、
+`customInit`、`customInstall`、`customCheckAppRunning` 等都定义成 `!macro`，而 NSIS 禁止重复
+定义宏；`.onInstSuccess` 在 electron-builder 的模板里没有任何定义，是应用文件就位之后唯一
+空着的执行点。
+
+### 安装包里已经带着部署层
+
+这正是那条接缝的意义：装完就有本产品的登录、余额与账号服务，不需要先手动跑脚本。
+
+`platform/windows/installer.nsh` 把 `platform/windows/deploy/` 拷进
+`<install>\resources\installer-ui\dsharness\`，再用**应用自带的** Node 运行时执行
+`deploy-entry.mjs` —— 不需要系统 Node、npm 或 pnpm。载荷由 `build-deploy-payload.mjs` 生成：
+`home.mjs` / `provision.mjs` / `install.mjs` / `host-auth.mjs` 与上层文件**逐字节相同**，
+`cordis.patch.yml` 是同一份行、**只改写一行** —— `platformOrigin` 烧成本次构建的地址，因为装好
+的机器上没有 `DSH_PLATFORM_ORIGIN`，而加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字
+（`packages/boot/app-boot/src/index.ts:157`）。副本一漂移，`deploy-payload.test.mjs` 就报红。
+
+```
+node platform/build-deploy-payload.mjs                        # write, default origin
+node platform/build-deploy-payload.mjs --platform-origin https://example.test
+node platform/build-deploy-payload.mjs --check                # fail when stale
+```
+
+地址必须是**裸 origin**。`platformOrigin(value, allowLoopbackHttp)`
+（`packages/credentials/deepseek-account-platform/src/protocol.ts:22`）会拒绝任何
+`pathname` 不是 `/` 的 URL —— 所以 `https://www.czmanong.com/dsharness` 这种带前缀的代管地址
+用不了，哪怕容器就在那儿。改为由网关把本产品那几个路径挂在裸 origin 上。
+
+载荷按顺序做两件事：
+
+1. **profile 不存在时创建 `desktop` profile。** 应用本来就会在首次启动创建它
+   （`apps/desktop/src/project-manager.ts:88`），而 `initProfile` 从不覆盖已存在的文件 ——
+   所以这里写同样的三个文件，应用自己的初始化就变成 no-op 而不是重写，同时让
+   `provisionProfile` 有 manifest 可用。少了这一步它会找不到 manifest 直接跳过。
+2. **写部署行并 provision 插件**（对该 profile），走的就是开发机上的那份 `install.mjs`。
+   载荷由那些文件生成；`deploy-entry.mjs` 只多给一个用
+   `resources\runtime\pnpm\bin\pnpm.mjs` 与自带 Node 拼出来的 pnpm 运行器。
+
+三个 profile 文件是**字面量**，因为载荷跑在普通 `node.exe` 下，不能从 `app.asar` 里 import
+`@deepseek-ai/dsh-app-boot`（只有 Electron 打过补丁的 `fs` 能读 asar）。`deploy-payload.test.mjs`
+用 `tsx` 跑上游的 `initProfile`，把三个文件逐字节比一遍。
+
+部署失败只**报告**、不让安装失败：应用照常运行，只是暂时连上游账号服务；退出码经
+`DetailPrint` 进安装日志与详情页。
+
+想不重复前面的准备阶段就验证这条接缝，把已有的 `win-unpacked` 重新包一次：
+
+```sh
+node platform/windows/verify-installer.mjs --output "$env:TEMP\seam"
+```
+
+它用 `--prepackaged`，会短路 `doPack`（`app-builder-lib/out/platformPackager.js:146`），
+于是只有 `NsisTarget` 会跑 —— 正是本产品替换的那一块。把 `deploy/deploy-entry.mjs` 删掉，
+构建会以 `File: … -> no files found` 失败，这就是反例：**载荷缺失＝构建失败**，而不是静默地
+产出一个不含部署层的安装包。
 
 ### 这里的行可以直接挂 fork 自有的代码
 
@@ -232,16 +319,39 @@ $env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-d
 
 ## 它改了什么
 
-`cordis.patch.yml` 有两条行，而且刻意是两种不同的东西：
-
-1. **覆盖** `packages/bundle/base/cordis.patch.yml` 声明的 `deepseek-account` 行 —— 补丁是**整块替换** `config`，所以条目要把该行拥有的键全部重述一遍；
-2. **插入** `dsharness-host-auth` —— 上游没有这一行。插入在构造上就不可能和上游冲突，所以 fork 自有的插件走「新增一行」而不是「改一行」。
+`cordis.patch.yml` 只有**一条**条目：覆盖 `packages/bundle/base/cordis.patch.yml` 声明的
+`deepseek-account` 行。补丁是**整块替换** `config`，所以条目要把该行拥有的键全部重述一遍。
+原来作为第二条的 `dsharness-host-auth` 插入**已经删除** —— 那个插件改成组合包发布，理由见上文。
 
 | 键 | 上游默认 | 本部署 |
 |----|----------|--------|
 | `platformOrigin` | `https://platform.deepseek.com` | 本产品 server（`PUBLIC_BASE_URL`） |
 | `desktopPlatform` | `null` | 保留原表达式 |
 | `allowLoopbackHttp` | `false` | 除非 `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0`，否则打开 |
+
+装好的那份副本里是**字面地址**而不是开发副本用的 `!!js process.env…` 表达式：装好的机器上没有
+环境变量可读，而且加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字。
+
+### 客户端打包时写死的地址必须能直达本产品
+
+`platformOrigin` 会被校验成 origin，官方协议的每条路径都直接拼在它后面：
+
+| 路径 | 由谁提供 |
+|------|----------|
+| `/auth-api/v0/dsh/auth_init`、`/auth-api/v0/users/current`、`/auth-api/v0/users/logout` | `server/src/routes/dsh-account.ts` |
+| `/api/v0/users/get_user_summary`、`/api/v0/users/get_unnotified_bonuses`、`/api/v0/users/ack_bonus_notified` | `server/src/routes/dsh-account.ts` |
+| `/dsh/authorize`、`/dsh/authorize/complete`、`/dsh/authorized` | `server/src/routes/dsh-account.ts` |
+| `/top_up`、`/usage`、`/api/page/*` | `server/src/routes/pages.ts` |
+
+所以网关必须把这些路径送到产品服务的端口，而且**不能吃掉前缀**：官方 provider 的
+`browserUrl()` 会把 `url.pathname` 与字面量 `/dsh/authorize`、`/dsh/authorized` 比对
+（`packages/credentials/deepseek-account-platform/src/protocol.ts:40`），它还拒绝平台回一个与自己
+配置不同的 origin。也就是说**前缀映射的部署在这个 provider 下根本走不通** —— 地址必须是
+「在本产品路径的根上提供这些路径」的那个主机名。
+
+账号页那两个链接必须**被渲染**而不是被重定向：桌面端用**同源** `WebContentsView` 打开它们，
+而它的 `will-redirect` 只放行 `account.origin`，302 出去就会被取消、用户看到空白。这就是
+`/top_up` 与 `/usage` 在 `server/src/routes/pages.ts` 里是页面而不是跳转网关的原因。
 
 ### 为什么一行就能接通官方全部登录
 

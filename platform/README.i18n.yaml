@@ -18,8 +18,11 @@
   en: 79bf51fe511c3304
   zh: 7ac75cf13243b3f2
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/packaging-this-product-s-desktop-build:
-  en: 90d3c05f1eb96035
-  zh: ebb4cb28b0429099
+  en: 149c857e5a9b5376
+  zh: f43f5fddb25a3a1f
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-installer-already-carries-the-deployment-layer:
+  en: befe84a0ec234e8e
+  zh: 07f7ad71462d207b
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/rows-here-can-mount-fork-owned-code:
   en: 3f3e7710c4f73ea0
   zh: fa5ae77c5c4c599d
@@ -45,8 +48,11 @@
   en: cd0b6a4eefc91fb3
   zh: 9645620ef58b84a0
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes:
-  en: 129668942e8e03f0
-  zh: c76cce1698be5f70
+  en: 9a380959c017954a
+  zh: 13336f0e4f4d40a6
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-origin-the-client-is-built-with-must-reach-this-product-directly:
+  en: 0fe52d68aafbeec6
+  zh: a5d1884bd5f601f7
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-one-row-wires-every-official-login:
   en: cfc676845b524ef0
   zh: 2e7c26e64e5b22fb

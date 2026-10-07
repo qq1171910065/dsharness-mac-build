@@ -1,0 +1,273 @@
+import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  buildDeployPayload, DEFAULT_PLATFORM_ORIGIN, PAYLOAD_ENTRY, PAYLOAD_MODULES, payloadDirectory, renderDeployPatch,
+} from './build-deploy-payload.mjs';
+import { parseArguments, hookEnvironment } from './package-windows.mjs';
+import { readConfigEnvironment, rewriteConfigArgument } from './windows/nsis-config-hook.mjs';
+import {
+  deploy, ensureDesktopProfile, PROFILE_BUNDLES, PROFILE_PATCH_TEMPLATE, PROFILE_PNPM_WORKSPACE, profilesUnder,
+} from './windows/deploy/deploy-entry.mjs';
+
+/**
+ * The installer seam's contract.
+ *
+ * Three things have to stay true for "the installer already carries the
+ * deployment layer" to mean anything, and each is asserted below:
+ *
+ * 1. the payload really is the product's own deployment code, not a copy that
+ *    drifted from it;
+ * 2. the NSIS include really references the payload, opens with the **upstream**
+ *    include, and stays compilable (pure ASCII, no macro redefinition);
+ * 3. the profile the payload creates is indistinguishable from the one the
+ *    application's own `initProfile` creates, because the application treats an
+ *    existing profile as the user's and never rewrites it.
+ *
+ * The behavioural half of (3) runs upstream's function through `tsx` when the
+ * repository has it; the source-text half always runs, so the check still fails
+ * loudly on a machine without `tsx`.
+ */
+
+const here = dirname(fileURLToPath(import.meta.url));
+const clientDir = resolve(here, '..');
+const upstreamProfile = join(clientDir, 'packages', 'boot', 'app-boot', 'src', 'profile.ts');
+const windowsDir = join(here, 'windows');
+const installer = join(windowsDir, 'installer.nsh');
+
+function temporaryDirectory(prefix) {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
+test('deploy payload: the committed copies are byte-identical to their platform/ sources', () => {
+  const target = payloadDirectory(here);
+  for (const name of PAYLOAD_MODULES) {
+    assert.equal(
+      readFileSync(join(target, name), 'utf8'),
+      readFileSync(join(here, name), 'utf8'),
+      `${name} must be a verbatim copy of platform/${name}`,
+    );
+  }
+  assert.ok(existsSync(join(target, PAYLOAD_ENTRY)), 'the hand-written entry point must be committed');
+});
+
+test('deploy payload: --check reports drift instead of rewriting it', () => {
+  const root = temporaryDirectory('deploy-payload-');
+  try {
+    for (const name of PAYLOAD_MODULES) {
+      writeFileSync(join(root, name), `original ${name}\n`);
+    }
+    mkdirSync(payloadDirectory(root), { recursive: true });
+    writeFileSync(join(payloadDirectory(root), PAYLOAD_ENTRY), 'hand written entry\n');
+    writeFileSync(join(root, 'cordis.patch.yml'), "- id: deepseek-account\n  config:\n    platformOrigin: !!js process.env.DSH_PLATFORM_ORIGIN ?? 'http://127.0.0.1:13090'\n");
+    buildDeployPayload({ root });
+    buildDeployPayload({ root, check: true });
+    writeFileSync(join(payloadDirectory(root), 'install.mjs'), 'drifted\n');
+    assert.throws(() => buildDeployPayload({ root, check: true }), /install\.mjs in .* is stale/);
+    // A check that finds drift must not have repaired it either.
+    assert.equal(readFileSync(join(payloadDirectory(root), 'install.mjs'), 'utf8'), 'drifted\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('deploy payload: the platform origin is baked in and must be a bare origin', () => {
+  const row = "- id: deepseek-account\n  config:\n    platformOrigin: !!js process.env.DSH_PLATFORM_ORIGIN ?? 'http://127.0.0.1:13090'\n";
+  assert.equal(renderDeployPatch(row, 'https://www.czmanong.com'), "- id: deepseek-account\n  config:\n    platformOrigin: 'https://www.czmanong.com'\n");
+  // The official provider rejects any origin whose pathname is not `/`, so a prefixed URL is a build error, not a runtime surprise.
+  assert.throws(() => renderDeployPatch(row, 'https://www.czmanong.com/dsharness'), /bare origin/);
+  assert.throws(() => renderDeployPatch(row, 'https://user:pass@example.test'), /bare origin/);
+  // A file whose origin line moved or multiplied means the file changed shape.
+  assert.throws(() => renderDeployPatch('[]\n', 'https://example.test'), /exactly one platformOrigin line/);
+  assert.throws(() => renderDeployPatch(`${row}${row}`, 'https://example.test'), /exactly one platformOrigin line/);
+});
+
+test('deploy payload: the committed patch carries the production origin', () => {
+  const text = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
+  assert.match(text, new RegExp(`platformOrigin: '${DEFAULT_PLATFORM_ORIGIN.replaceAll('.', '\\.')}'`));
+  assert.doesNotMatch(text, /DSH_PLATFORM_ORIGIN/, 'the installed copy must not depend on an environment variable');
+});
+
+test('installer include: opens with the upstream include and stays pure ASCII', () => {
+  const bytes = readFileSync(installer);
+  assert.equal(bytes.filter((byte) => byte > 0x7f).length, 0, 'makensis rejects a non-ASCII byte in an include without a BOM');
+  const text = bytes.toString('utf8');
+  const first = text.split('\n').find((line) => line.startsWith('!include '));
+  assert.equal(first, '!include "${__FILEDIR__}\\..\\..\\apps\\desktop\\scripts\\installer.nsh"');
+  assert.doesNotMatch(text, /!macro\s+(?:customHeader|customInit|customInstall|customCheckAppRunning)\b/u,
+    'NSIS forbids redefining an upstream macro');
+});
+
+test('installer include: runs the deployment layer from the installed application', () => {
+  const text = readFileSync(installer, 'utf8');
+  assert.match(text, /^Function \.onInstSuccess$/mu);
+  for (const file of [...PAYLOAD_MODULES, PAYLOAD_ENTRY, 'cordis.patch.yml']) {
+    assert.ok(text.includes(`deploy\\${file}`), `the include must embed ${file}`);
+  }
+  assert.match(text, /nsExec::ExecToLog '.*resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node\.exe.*deploy-entry\.mjs.*\$INSTDIR.*'/u);
+  assert.match(text, /DetailPrint "DSH Desktop: deployment layer exited with \$0"/u);
+});
+
+test('deploy entry: creates the profile the application would, and never rewrites one', () => {
+  const home = temporaryDirectory('deploy-profile-');
+  try {
+    assert.equal(ensureDesktopProfile(home), true);
+    const dir = join(home, 'profiles', 'desktop');
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    assert.deepEqual(manifest.dsh.profile.bundles, [...PROFILE_BUNDLES]);
+    assert.equal(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'), PROFILE_PATCH_TEMPLATE);
+    assert.equal(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), PROFILE_PNPM_WORKSPACE);
+    // A second run is the application's own first launch: everything is the user's now.
+    writeFileSync(join(dir, 'package.json'), '{"mine":true}\n');
+    assert.equal(ensureDesktopProfile(home), false);
+    assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), '{"mine":true}\n');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('deploy entry: the Desktop profile is provisioned first, then whatever the home already has', () => {
+  const home = temporaryDirectory('deploy-profiles-');
+  try {
+    assert.deepEqual(profilesUnder(home), ['desktop']);
+    mkdirSync(join(home, 'profiles', 'web'), { recursive: true });
+    mkdirSync(join(home, 'profiles', 'node_modules'), { recursive: true });
+    mkdirSync(join(home, 'profiles', 'desktop'), { recursive: true });
+    assert.deepEqual(profilesUnder(home), ['desktop', 'web']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('deploy entry: writes the rows and provisions every profile, with an injected runner', () => {
+  const home = temporaryDirectory('deploy-rows-');
+  const install = temporaryDirectory('deploy-install-');
+  try {
+    const calls = [];
+    const report = deploy({
+      home,
+      installDir: install,
+      run: (profileDir, args) => { calls.push({ profileDir, args }); return { status: 0, output: '' }; },
+    });
+    assert.equal(report.created, true);
+    assert.equal(report.target, join(home, 'cordis.patch.yml'));
+    assert.match(readFileSync(report.target, 'utf8'), /platformOrigin: 'https:\/\/www\.czmanong\.com'/u);
+    assert.deepEqual(report.reports.map((entry) => entry.profile), ['desktop']);
+    assert.deepEqual(calls.map((call) => call.profileDir), [join(home, 'profiles', 'desktop')]);
+    assert.deepEqual(calls[0].args.slice(0, 1), ['add']);
+    assert.ok(calls[0].args.includes('dshmarket'), 'the marketplace install is what makes the Plugins page work');
+    // The generated bundle package is placed without a package manager, so it survives an offline install.
+    assert.ok(existsSync(join(home, 'profiles', 'desktop', 'node_modules', 'dsharness-host-auth', 'index.mjs')));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(install, { recursive: true, force: true });
+  }
+});
+
+test('deploy entry: an install directory is required', () => {
+  const previous = process.env.DSHARNESS_INSTALL_DIR;
+  delete process.env.DSHARNESS_INSTALL_DIR;
+  try {
+    assert.throws(() => deploy({ home: temporaryDirectory('deploy-nodir-'), run: () => ({ status: 0 }) }), /install directory is required/);
+  } finally {
+    if (previous !== undefined) process.env.DSHARNESS_INSTALL_DIR = previous;
+  }
+});
+
+test('config hook: rewrites only the upstream configuration argument', () => {
+  const argv = ['node', 'C:\\client\\apps\\desktop\\node_modules\\electron-builder\\cli.js', '--config', 'electron-builder.config.mjs', '--win'];
+  assert.equal(rewriteConfigArgument(argv, 'C:\\staged\\config.mjs'), true);
+  assert.equal(argv[3], 'C:\\staged\\config.mjs');
+  // A run that already names another configuration is left alone: the substitution happens once.
+  const other = ['node', 'cli.js', '--config', 'C:\\staged\\config.mjs'];
+  assert.equal(rewriteConfigArgument(other, 'C:\\other.mjs'), false);
+  assert.equal(other[3], 'C:\\staged\\config.mjs');
+  // `--config.<path>=<value>` overrides carry no separate argument and must not be touched.
+  const dotted = ['node', 'cli.js', '--config.nsis.unicode=false'];
+  assert.equal(rewriteConfigArgument(dotted, 'C:\\staged\\config.mjs'), false);
+  assert.deepEqual(dotted.slice(2), ['--config.nsis.unicode=false']);
+});
+
+test('config hook: reads its configuration path from the environment', () => {
+  assert.equal(readConfigEnvironment(undefined), undefined);
+  assert.equal(readConfigEnvironment(''), undefined);
+  assert.equal(readConfigEnvironment('C:\\staged\\config.mjs'), 'C:\\staged\\config.mjs');
+  assert.match(readConfigEnvironment(pathToFileURL('C:\\staged\\config.mjs').href), /staged/);
+  assert.equal(readConfigEnvironment('config.mjs'), resolve('config.mjs'));
+});
+
+test('config hook: the environment a packaging run sets is self-consistent', () => {
+  const env = hookEnvironment('C:\\staged\\config.mjs');
+  assert.match(env.NODE_OPTIONS, /^--import file:\/\/\/.*nsis-config-hook\.mjs$/u);
+  assert.equal(env.DSHARNESS_NSIS_CONFIG_HOOK, '1');
+  assert.equal(env.DSHARNESS_NSIS_CONFIG, 'C:\\staged\\config.mjs');
+  assert.ok(existsSync(fileURLToPath(env.NODE_OPTIONS.replace('--import ', ''))));
+});
+
+test('package-windows: only an unsigned Windows build may be produced', () => {
+  assert.deepEqual(parseArguments(['--unsigned']), { passthrough: ['--unsigned'], check: false, origin: DEFAULT_PLATFORM_ORIGIN });
+  assert.deepEqual(parseArguments(['--unsigned', '--build-version', '0.2.1-alpha.1.20261007.1']).passthrough,
+    ['--unsigned', '--build-version', '0.2.1-alpha.1.20261007.1']);
+  assert.deepEqual(parseArguments(['--check']).check, true);
+  assert.equal(parseArguments(['--check', '--platform-origin', 'https://example.test']).origin, 'https://example.test');
+  assert.throws(() => parseArguments([]), /unsigned Windows builds only/u);
+  assert.throws(() => parseArguments(['--unsigned', '--config']), /unknown option/u);
+  assert.throws(() => parseArguments(['--unsigned', '--build-version']), /requires a value/u);
+  assert.throws(() => parseArguments(['--unsigned', '--platform-origin']), /requires a value/u);
+});
+
+test('upstream parity: the literal profile an install creates matches initProfile', () => {
+  /*
+   * Source-text half: this runs everywhere, and fails when upstream's recipe
+   * moves. The templates are template literals in `profile.ts`, so the escapes
+   * have to be undone before comparing against the written files.
+   */
+  const source = readFileSync(upstreamProfile, 'utf8');
+  const unescape = (text) => text.replaceAll('\\`', '`').replaceAll('\\${', '${');
+  const literal = (name) => {
+    const match = new RegExp(`const ${name} = \`([\\s\\S]*?)\`\\n`, 'u').exec(source);
+    assert.ok(match, `${name} must still be a template literal in packages/boot/app-boot/src/profile.ts`);
+    return unescape(match[1]);
+  };
+  assert.equal(PROFILE_PATCH_TEMPLATE, literal('PROFILE_PATCH_TEMPLATE'));
+  assert.equal(PROFILE_PNPM_WORKSPACE, literal('PROFILE_PNPM_WORKSPACE'));
+  assert.match(source, new RegExp(`web: \\{\\s*bundles: \\[${PROFILE_BUNDLES.map((name) => `'${name.replaceAll('/', '\\/')}'`).join(', ')}\\],`, 'u'));
+  assert.equal(JSON.parse(readFileSync(join(clientDir, 'packages', 'boot', 'app-boot', 'package.json'), 'utf8')).name,
+    '@deepseek-ai/dsh-app-boot');
+
+  /*
+   * Behavioural half: run upstream's own function through tsx and compare byte
+   * for byte. `tsx` is a development dependency of this workspace; without it
+   * the source-text assertions above are the whole guard.
+   */
+  const tsx = join(clientDir, 'node_modules', 'tsx', 'dist', 'esm', 'index.mjs');
+  if (!existsSync(tsx)) return;
+  const directory = temporaryDirectory('initprofile-');
+  try {
+    const probe = join(directory, 'probe.mjs');
+    writeFileSync(probe, [
+      `import { initProfile, PROFILE_TEMPLATES } from ${JSON.stringify(pathToFileURL(upstreamProfile).href)}`,
+      "import { readFileSync } from 'node:fs'",
+      "import { join } from 'node:path'",
+      'const dir = process.argv[2]',
+      'initProfile(dir, PROFILE_TEMPLATES.web.bundles)',
+      "const out = {}",
+      "for (const file of ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml']) out[file] = readFileSync(join(dir, file), 'utf8')",
+      'process.stdout.write(JSON.stringify(out))',
+      '',
+    ].join('\n'));
+    const target = join(directory, 'profile');
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(tsx).href, probe, target], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const upstream = JSON.parse(result.stdout);
+    assert.equal(PROFILE_PATCH_TEMPLATE, upstream['cordis.patch.yml']);
+    assert.equal(PROFILE_PNPM_WORKSPACE, upstream['pnpm-workspace.yaml']);
+    assert.deepEqual(PROFILE_BUNDLES, JSON.parse(upstream['package.json']).dsh.profile.bundles);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,72 @@
+# dsharness deployment rows.
+#
+# This file is the fork's own patch layer. It targets rows that upstream already
+# declares, so it contains no new plugin: it only changes what the official
+# harness points at.
+#
+# A patch replaces the targeted row's WHOLE config, so the entry below restates
+# every key that row owns. See platform/README.md for why each key is there.
+#
+# name is deliberately omitted: in a non-insert patch name is an assertion, and a
+# mismatch makes the patch silently SKIP with a warning. Leaving it out means an
+# upstream package rename cannot turn this deployment back into "login talks to
+# DeepSeek". The row is identified by id alone.
+
+- id: deepseek-account
+  config:
+    # Every official login entry point (desktop welcome window, Settings account
+    # page, desktop onboarding quota page, the deepseek-account model provider)
+    # goes through ctx.deepseekAccount and only ever talks to this origin.
+    # Pointing it here is what makes "every official login uses Platform" true.
+    platformOrigin: 'https://www.czmanong.com'
+    # The original expression from packages/bundle/base/cordis.patch.yml: only a
+    # real desktop profile on macOS or Windows reports a desktop platform, which
+    # is what makes Platform's native client identity headers correct.
+    desktopPlatform: !!js "ctx.get('profileContext')?.name === 'desktop' && ['darwin', 'win32'].includes(process.platform) ? process.platform : null"
+    # Accepted only for an explicitly enabled loopback HTTP origin: local
+    # development points platformOrigin at http://127.0.0.1:13090, and without
+    # this the provider rejects that origin at load.
+    allowLoopbackHttp: !!js process.env.DSH_PLATFORM_ALLOW_LOOPBACK_HTTP !== '0'
+    # Kept at the upstream defaults on purpose. Change these only with a reason:
+    # inferenceOrigin must match the llm route's own baseURL, which the model
+    # route work (see platform/README.md) has not wired to this product yet.
+    embeddedPageDist: ''
+    inferenceOrigin: 'https://api.deepseek.com'
+    rewriteBrowserOrigin: false
+    requestTimeoutMs: 30000
+    balanceTimeoutMs: 30000
+    logoutMaxRetries: 5
+    logoutRetryDelayMs: 1000
+    attemptTimeoutMs: 600000
+
+# ---------------------------------------------------------------------------
+# 本 fork 自己的插件**不在这份清单里**
+#
+# 这里曾有一条 `insert`，把 `platform/host-auth.mjs` 直接插进 Loader。
+# 那不是错，只是它满足不了产品要求：
+#
+# > 我希望把这个插件作为一个自定义插件，默认不启用。
+#
+# 官方「插件」页（`packages/client/ui-plugin-manager`）列的是**包**，不是 Loader 行
+# （`pluginManager/listBundles`），并且用两个包级标志分两组：
+# `installed || !optional` 进「已安装」，`optional && !installed` 进「官方」。
+# 一行从 patch 文件插进去的行不属于任何包 —— 实测在真机桌面 Host 上，
+# 它**能被 `listPlugins` 定位**（`patchId: dsharness-host-auth`），
+# 但 `listBundles` 里没有它，所以页面上**没有卡片可切**。
+#
+# 所以自有的插件改由 `platform/provision.mjs` 装成**真正的组合包**：
+# 包写在 `$DSH_HOME/dsharness-plugins/<name>/`，按需 `pnpm add` 进 profile，
+# 是否启用由 `dsh.profile.bundles` 里有没有它决定 —— 也就是「已安装未选中」＝默认关闭，
+# 用户在插件页点一下即可打开（走官方 `setBundleEnabled`，没有我们自己的机制）。
+#
+# ⚠️ 这里**也不要**为了「默认关闭」而在本层写 `disabled: true`：
+# `readProfilePatches`（`packages/boot/app-boot/src/profile-context.ts:63`）的层序是
+# **bundle 层 → profile 层 → home 层（本文件）→ overlay**，后应用的层覆盖前面的行，
+# 于是本层的 `disabled` 会成为最后一句话，用户在插件页打开的开关永远不生效。
+# 实测（`applyEntryPatches`）：
+#
+#   [profile(disabled=false), home(insert + disabled=true)] → disabled=true   ← 用户的开关被吃掉
+#   [home(insert 不表态),     profile(disabled=true)]       → disabled=true   ← 默认关，且开关生效
+#
+# 因此本文件只保留上面那条「改官方已声明的行」的配置补丁，己方插件一律走组合包。
+# ---------------------------------------------------------------------------
