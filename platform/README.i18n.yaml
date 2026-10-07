@@ -39,8 +39,11 @@
   en: ec450807b5a908c4
   zh: 95a4a12b0e8f3580
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/server-to-server-access-to-the-official-api-host-auth-mjs:
-  en: 85ca84e7b950ec7f
-  zh: b677d38792e68f69
+  en: c30be2d195d19046
+  zh: 1f3b621085f20333
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-port-and-the-secret-have-to-be-readable-dsharness-gateway:
+  en: 9677490013de7158
+  zh: b69400f4bad7f4af
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-account-page-s-two-links-must-be-rendered-by-this-product:
   en: 01eb685612e24b41
   zh: 8dd6e4f9c6657e9c
@@ -48,14 +51,23 @@
   en: cd0b6a4eefc91fb3
   zh: 9645620ef58b84a0
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes:
-  en: 9a380959c017954a
-  zh: 13336f0e4f4d40a6
+  en: 5400f91085575828
+  zh: 42669351e95c0515
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-model-route-is-this-product-s-gateway-not-deepseek-s:
+  en: 68f42d805dbea3c7
+  zh: 8b0073d322f7adb6
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-the-account-backed-model-route-is-switched-off:
+  en: b9df192e3fe18670
+  zh: d069f0a3d2de4fbf
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-delivery-step-the-key-needs-model-key-mjs:
+  en: a886cae4d5e7895b
+  zh: ad23ce125e314e87
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/check-for-updates-update-mjs:
+  en: 28dc902aa0abe164
+  zh: 237490523d26e9fb
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-origin-the-client-is-built-with-must-reach-this-product-directly:
-  en: 0fe52d68aafbeec6
-  zh: a5d1884bd5f601f7
+  en: b572b1b36828f4bc
+  zh: f67447aba8b5f26b
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-one-row-wires-every-official-login:
   en: cfc676845b524ef0
   zh: 2e7c26e64e5b22fb
-/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/what-is-still-missing-getting-the-per-user-gateway-key-into-the-provider:
-  en: ad80340ec5ba6442
-  zh: ea23324bbf930360

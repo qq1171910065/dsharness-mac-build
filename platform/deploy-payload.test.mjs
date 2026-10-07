@@ -13,6 +13,7 @@ import { readConfigEnvironment, rewriteConfigArgument } from './windows/nsis-con
 import { installInto } from './install.mjs';
 import {
   deploy, ensureDesktopProfile, PROFILE_BUNDLES, PROFILE_PATCH_TEMPLATE, PROFILE_PNPM_WORKSPACE, profilesUnder,
+  recordInstalledVersion,
 } from './windows/deploy/deploy-entry.mjs';
 
 /**
@@ -157,6 +158,54 @@ test('installer include: runs the deployment layer from the installed applicatio
   }
   assert.match(text, /nsExec::ExecToLog '.*resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node\.exe.*deploy-entry\.mjs.*\$INSTDIR.*'/u);
   assert.match(text, /DetailPrint "DSH Desktop: deployment layer exited with \$0"/u);
+  /*
+   * The version has to travel with the invocation. An unsigned build has no update
+   * feed to ask later (`publish: null` ⇒ no `app-update.yml`), so the installer —
+   * which electron-builder feeds `${VERSION}` — is the only witness to what the user
+   * actually installed. Without it the check-for-updates page could only ever show
+   * the latest release, never whether it is newer than this machine.
+   */
+  assert.match(text, /deploy-entry\.mjs"\s+"\$INSTDIR"\s+"\$\{VERSION\}"/u,
+    'the include must pass the installer version to the deployment entry');
+});
+
+test('installer include: ${VERSION} is an NSIS define electron-builder supplies', () => {
+  // Guard the guard: if a future electron-builder renames the define, the include
+  // above would compile to a literal and every install would record nothing.
+  const nsisTarget = join(clientDir, 'apps', 'desktop', 'node_modules', 'app-builder-lib',
+    'out', 'targets', 'nsis', 'NsisTarget.js');
+  const text = readFileSync(nsisTarget, 'utf8');
+  assert.match(text, /VERSION: appInfo\.version/u, 'electron-builder defines VERSION for the NSIS script');
+});
+
+test('deploy entry: the installer version is recorded for the update check', async () => {
+  const home = temporaryDirectory('deploy-version-');
+  /*
+   * The reader and the writer live in different payload modules (`update.mjs` reads
+   * the record, `deploy-entry.mjs` writes it) and neither can import the other: the
+   * payload directory is flat, so the file name is a literal in both. Read them here
+   * and compare, so a rename cannot silently break the feature.
+   */
+  const { INSTALL_RECORD, readInstallRecord } = await import('./update.mjs');
+  try {
+    // No version supplied (a hand-run `deploy-entry.mjs`, or an older installer):
+    // nothing is written, so the page says "unknown" rather than inventing a value.
+    assert.equal(recordInstalledVersion(home, undefined, 'C:/app'), undefined);
+    assert.equal(existsSync(join(home, INSTALL_RECORD)), false);
+    assert.equal(recordInstalledVersion(home, '   ', 'C:/app'), undefined);
+    assert.equal(existsSync(join(home, INSTALL_RECORD)), false);
+
+    assert.equal(recordInstalledVersion(home, '0.2.1-alpha.1.20261007.2', 'C:/app'),
+      '0.2.1-alpha.1.20261007.2');
+    const record = JSON.parse(readFileSync(join(home, INSTALL_RECORD), 'utf8'));
+    assert.equal(record.version, '0.2.1-alpha.1.20261007.2');
+    assert.equal(record.installDir, 'C:/app');
+    assert.equal(typeof record.installedAt, 'string');
+    assert.equal(INSTALL_RECORD, 'dsharness-install.json');
+    assert.equal(readInstallRecord(home)?.version, '0.2.1-alpha.1.20261007.2');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('deploy entry: creates the profile the application would, and never rewrites one', () => {

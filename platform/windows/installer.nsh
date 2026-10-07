@@ -56,10 +56,16 @@ Function .onInstSuccess
   File "${__FILEDIR__}\deploy\install.mjs"
   File "${__FILEDIR__}\deploy\host-auth.mjs"
   File "${__FILEDIR__}\deploy\model-key.mjs"
+  File "${__FILEDIR__}\deploy\update.mjs"
   File "${__FILEDIR__}\deploy\cordis.patch.yml"
 
   ; The application ships its own Node runtime, so no system Node is required.
-  nsExec::ExecToLog '"$INSTDIR\resources\runtime\primary-runtime\dependencies\node\bin\node.exe" "$INSTDIR\resources\installer-ui\dsharness\deploy-entry.mjs" "$INSTDIR"'
+  ; The second argument is the version this installer was built as
+  ; (electron-builder sets NSIS's `${VERSION}` from the packaged app version), so
+  ; the payload can record it for "check for updates" to compare against. Only the
+  ; installer knows what the user actually installed: an unsigned build has no
+  ; update feed to ask later.
+  nsExec::ExecToLog '"$INSTDIR\resources\runtime\primary-runtime\dependencies\node\bin\node.exe" "$INSTDIR\resources\installer-ui\dsharness\deploy-entry.mjs" "$INSTDIR" "${VERSION}"'
   Pop $0
   ${If} $0 != 0
     ; A failed deployment is reported but does not fail the install: the

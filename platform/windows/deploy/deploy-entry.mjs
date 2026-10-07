@@ -44,7 +44,7 @@
  * code into its log.
  *
  * Usage (as the installer runs it):
- *   node.exe deploy-entry.mjs "C:\path\to\install"
+ *   node.exe deploy-entry.mjs "C:\path\to\install" "<installed version>"
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -89,6 +89,15 @@ const RUNTIME_PNPM = join('resources', 'runtime', 'pnpm', 'bin', 'pnpm.mjs');
 
 /** Where the application keeps the Node runtime, relative to the install directory. */
 const RUNTIME_NODE = join('resources', 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', 'node.exe');
+
+/**
+ * The version record this layer writes into the Harness home.
+ *
+ * Read back by `platform/update.mjs` (the check-for-updates page). Spelled as a
+ * literal rather than imported because the payload directory is flat — every
+ * module there is a sibling file, and the constant has to exist in both.
+ */
+const INSTALL_RECORD = 'dsharness-install.json';
 
 /**
  * Create the Desktop profile when it is absent, and never touch it otherwise.
@@ -172,11 +181,11 @@ export function runtimePnpm(installDir) {
 /**
  * Apply the whole layer.
  *
- * @param options - `home`, `installDir` and `profiles` override the resolved
- *   ones; `run` injects a fake pnpm runner; `marketplace: false` leaves the
- *   marketplace alone (offline installs, and the specs).
- * @returns a report: the rows file, whether the profile was created, and one
- *   provisioning report per profile.
+ * @param options - `home`, `installDir`, `version` and `profiles` override the
+ *   resolved ones; `run` injects a fake pnpm runner; `marketplace: false` leaves
+ *   the marketplace alone (offline installs, and the specs).
+ * @returns a report: the rows file, whether the profile was created, where the
+ *   installed version was recorded, and one provisioning report per profile.
  */
 export function deploy(options = {}) {
   const home = options.home ?? resolveDshHome();
@@ -192,7 +201,32 @@ export function deploy(options = {}) {
     profiles: options.profiles ?? profilesUnder(home),
     withMarketplace: options.marketplace !== false,
   });
-  return { home, created, target, reports };
+  const version = recordInstalledVersion(home, options.version, installDir);
+  return { home, created, target, reports, version };
+}
+
+/**
+ * Record which version this installer put on the machine.
+ *
+ * The updater cannot answer that here: unsigned builds carry no update feed
+ * (`publish: null`), so there is nothing to ask. NSIS knows, because
+ * electron-builder defines its `${VERSION}`, and the include passes it as the
+ * second argument.
+ *
+ * @param home - Harness home.
+ * @param version - the value from the installer, if it supplied one.
+ * @param installDir - the application directory, recorded for diagnostics.
+ * @returns the version written, or undefined when none was supplied.
+ */
+export function recordInstalledVersion(home, version, installDir) {
+  const value = String(version ?? '').trim();
+  if (value === '') return undefined;
+  writeFileSync(join(home, INSTALL_RECORD), `${JSON.stringify({
+    version: value,
+    installDir: String(installDir ?? ''),
+    installedAt: new Date().toISOString(),
+  }, undefined, 2)}\n`, 'utf8');
+  return value;
 }
 
 /** The `platformOrigin` the embedded rows carry, for the diagnostic line. */
@@ -206,7 +240,7 @@ function main() {
   const say = (line) => process.stdout.write(`${line}\n`);
   let result;
   try {
-    result = deploy({ installDir });
+    result = deploy({ installDir, version: process.argv[3] });
   } catch (error) {
     say(`[dsharness] deployment layer failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
@@ -217,6 +251,9 @@ function main() {
   say(`[dsharness] desktop profile: ${result.created ? 'created' : 'already present, left untouched'}`);
   say(`[dsharness] deployment rows: ${result.target}`);
   say(`[dsharness] account origin: ${rowsOrigin(block)}`);
+  say(`[dsharness] installed version: ${result.version === undefined
+    ? 'not recorded (the installer passed none); check for updates will show the latest only'
+    : `${result.version} -> ${join(result.home, INSTALL_RECORD)}`}`);
   for (const report of result.reports) {
     if (report.status === 'skipped') {
       say(`[dsharness] ${report.profile}: ${report.reason}`);

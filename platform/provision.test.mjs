@@ -39,11 +39,17 @@ import {
 /** The model-key delivery plugin: installed AND selected. */
 const MODEL_KEY = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-model-key');
 
+/** The check-for-updates plugin; installed and selected (nothing to switch off). */
+const UPDATE = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-update');
+
 /** The gateway plugin: installed but NOT selected. */
 const GATEWAY = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-host-auth');
 
 /** Every plugin this product generates locally, in shipped order. */
-const OWN_PLUGINS = [MODEL_KEY, GATEWAY];
+const OWN_PLUGINS = [MODEL_KEY, UPDATE, GATEWAY];
+
+/** The plugins that start switched on. */
+const SELECTED_PLUGINS = [MODEL_KEY, UPDATE];
 
 const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`, 'utf8');
 
@@ -74,16 +80,16 @@ function fakeRunner(profileDir, calls) {
   };
 }
 
-test('planProvisioning: only the marketplace and the key plugin are selected (默认不启用)', () => {
+test('planProvisioning: only the marketplace, the key plugin and the updater are selected', () => {
   const plan = planProvisioning({ dependencies: {}, dsh: { profile: { bundles: [] } } });
   assert.deepEqual(
     plan.install.map((entry) => entry.name),
     [...OWN_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE],
   );
-  // The gateway plugin is installed but NOT selected; the model-key plugin must be
-  // selected, because a model route whose credential is never delivered fails every
-  // request with MISSING_CREDENTIAL.
-  assert.deepEqual(plan.select, [MODEL_KEY.name, MARKETPLACE_PACKAGE]);
+  // The gateway plugin is installed but NOT selected (默认不启用); the other two must
+  // be selected: a model route whose credential is never delivered fails every
+  // request, and a check-for-updates page nobody can reach is not a feature.
+  assert.deepEqual(plan.select, [...SELECTED_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE]);
 });
 
 test('planProvisioning: our own plugins need no package manager, the marketplace does', () => {
@@ -110,17 +116,26 @@ test('pluginInstallSpec: a file spec inside the profile, never link: or an absol
 test('planProvisioning: selection is only ever added, never removed', () => {
   // A selection the person made in the page must survive every rerun.
   const plan = planProvisioning({
-    dependencies: { [MODEL_KEY.name]: 'link:../../x', [GATEWAY.name]: 'link:../../y', [MARKETPLACE_PACKAGE]: '^1' },
+    dependencies: {
+      ...Object.fromEntries(OWN_PLUGINS.map((plugin) => [plugin.name, 'link:../../x'])),
+      [MARKETPLACE_PACKAGE]: '^1',
+    },
     dsh: { profile: { bundles: [GATEWAY.name] } },
   });
   assert.deepEqual(plan.install, [], 'everything is already installed');
-  assert.deepEqual(plan.select, [MODEL_KEY.name, MARKETPLACE_PACKAGE], 'only the not-yet-selected ones are added');
+  assert.deepEqual(plan.select, [
+    ...SELECTED_PLUGINS.map((plugin) => plugin.name),
+    MARKETPLACE_PACKAGE,
+  ], 'only the not-yet-selected ones are added');
 });
 
 test('planProvisioning: already selected means nothing to install and nothing to select', () => {
   const plan = planProvisioning({
-    dependencies: { [MODEL_KEY.name]: 'link:../../x', [GATEWAY.name]: 'link:../../y', [MARKETPLACE_PACKAGE]: '^1' },
-    dsh: { profile: { bundles: [MODEL_KEY.name, MARKETPLACE_PACKAGE] } },
+    dependencies: {
+      ...Object.fromEntries(OWN_PLUGINS.map((plugin) => [plugin.name, 'link:../../x'])),
+      [MARKETPLACE_PACKAGE]: '^1',
+    },
+    dsh: { profile: { bundles: [...SELECTED_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE] } },
   });
   assert.deepEqual(plan.install, []);
   assert.deepEqual(plan.select, []);
@@ -132,7 +147,7 @@ test('planProvisioning: --no-marketplace leaves the marketplace entirely alone',
     { withMarketplace: false },
   );
   assert.deepEqual(plan.install.map((entry) => entry.name), OWN_PLUGINS.map((plugin) => plugin.name));
-  assert.deepEqual(plan.select, [MODEL_KEY.name]);
+  assert.deepEqual(plan.select, SELECTED_PLUGINS.map((plugin) => plugin.name));
 });
 
 test('writePluginPackage: the package declares a bundle patch and a relative row name', () => {
@@ -199,7 +214,7 @@ test('provisionProfile: dry run writes no plugin package and runs no package man
   }
 });
 
-test('provisionProfile: installs all three, selects the marketplace and the key plugin', () => {
+test('provisionProfile: installs all four, selects the marketplace and the two on-by-default plugins', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
     const dir = makeProfile(root, 'desktop');
@@ -214,16 +229,18 @@ test('provisionProfile: installs all three, selects the marketplace and the key 
       [...OWN_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE].sort(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    // `installed` for all three: this is what makes the Plugins page show cards at all.
+    // `installed` for all of them: this is what makes the Plugins page show cards at all.
     for (const plugin of OWN_PLUGINS) assert.ok(Object.hasOwn(manifest.dependencies, plugin.name));
     assert.ok(Object.hasOwn(manifest.dependencies, MARKETPLACE_PACKAGE));
     // Our dependencies point at the package inside the profile, as file: specs.
     for (const plugin of OWN_PLUGINS) {
       assert.equal(manifest.dependencies[plugin.name], pluginInstallSpec(plugin.name));
     }
-    // `enabled` for the marketplace and the key plugin, never for the gateway one.
+    // `enabled` follows each plugin's `defaultEnabled`, never the gateway's.
     assert.deepEqual(manifest.dsh.profile.bundles.filter((name) => name === MARKETPLACE_PACKAGE), [MARKETPLACE_PACKAGE]);
-    assert.deepEqual(manifest.dsh.profile.bundles.filter((name) => name === MODEL_KEY.name), [MODEL_KEY.name]);
+    for (const plugin of SELECTED_PLUGINS) {
+      assert.deepEqual(manifest.dsh.profile.bundles.filter((name) => name === plugin.name), [plugin.name]);
+    }
     assert.ok(!manifest.dsh.profile.bundles.includes(GATEWAY.name));
   } finally {
     rmSync(root, { recursive: true, force: true });

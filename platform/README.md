@@ -33,17 +33,22 @@ This layer therefore edits no upstream file and uses three public mechanisms:
 
 ```text
 platform/
-  cordis.patch.yml         deployment rows: point the official login at this product
+  cordis.patch.yml         deployment rows: login origin, model route, and the disabled row
   install.mjs              write those rows, then provision the profile plugins
   provision.mjs            install this product's plugins in the shape the Plugins page can switch
-  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
+  model-key.mjs            fork-owned plugin: fetch this account's gateway key into the credentials
+  update.mjs               fork-owned plugin: show the installed vs published version
+  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api,
+                           and the /dsharness/gateway page with the port and the secret
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
-  install.test.mjs         the deployment rows (11 cases)
-  provision.test.mjs       the plugin provisioning policy (16 cases)
-  host-auth.test.mjs       the plugin's pure functions (18 cases)
-  deploy-payload.test.mjs  the installer seam: payload, include and profile parity (15 cases)
+  install.test.mjs         the deployment rows and their layer precedence
+  provision.test.mjs       the plugin provisioning policy
+  model-key.test.mjs       the key delivery plugin (20 cases)
+  update.test.mjs          version comparison and the update surface (12 cases)
+  host-auth.test.mjs       the gateway plugin's pure functions and its pages
+  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
@@ -317,7 +322,44 @@ The official `/api` authenticates with a cookie that only a browser holding the 
 | wrong or short secret | 401, same as above |
 | `Authorization: Bearer <secret>` | admitted; covers unary RPC **and** the `/api/remote.mux` upgrade |
 | browser on the LAN | `/dsharness/auth` exchanges the secret for a cookie, then `/` and `/api` both work |
-| secret unset or shorter than 16 chars | plugin does nothing (one warning); `/api` keeps upstream behaviour |
+| secret unset | one is generated and stored on first run, so the channel works and can be read off `/dsharness/gateway` |
+
+### The port and the secret have to be readable (`/dsharness/gateway`)
+
+"I cannot integrate with it" was the report, and the reason was structural: the port and the
+shared secret existed only inside the process. `dsh web` prints `?token=` once, at startup,
+into a terminal — and the desktop application has no terminal at all. So `host-auth.mjs`
+renders both:
+
+| surface | what it gives |
+|---------|---------------|
+| `GET /dsharness/gateway` | an HTML page: port, local address, shared secret, cookie name, login path, and a copy button |
+| `GET /dsharness/gateway.json` | the same facts as JSON, for callers and for the acceptance check |
+
+Three details are deliberate:
+
+- **Loopback only.** A non-loopback request gets a page explaining that, and the JSON surface
+  answers `403`. The secret is meant to be readable on the machine that runs DSH and nowhere
+  else.
+- **The port comes from the request's own authority**, not from a stored config:
+  `webServer.port` is only known after listening when the configured port is `0`, and the
+  authority is the `host:port` the caller actually reached, so it is always the right one.
+- **No `?token=`.** The token `dsh web` prints is the *connection layer's* one-shot credential,
+  which this plugin neither has nor needs; mixing it with the shared secret in one URL would
+  make "which is which" permanently unclear.
+
+A secret that is unset (or too short) is now **generated and persisted** rather than leaving
+the plugin unmounted: the deployment row always supplies a `token` key, so "unset" is the
+normal default, and a channel that switches itself off has nothing to display. The generated
+value goes into the credential layer under `DSHARNESS_AUTH_TOKEN`, which makes it stable
+across restarts — a secret that changed every launch would be a secret the user could never
+copy down. `enabled: false` is the one way to turn the channel off.
+
+Both surfaces are registered as `kind: 'exact'` routes and additionally allowed through
+`authorizeIndex`: `webServer.match()` checks the exact table first, but `frontend-static`
+delegates index requests to `authorizeIndex`, which accepts only `GET /` — so without that
+allowance these pages would be reachable only if route registration happened to win the race.
+
 
 It wraps `connection.requestRejection` and `connection.authorizeIndex` instead of registering a route, because `/api` is already claimed: `webServer.register` throws on a duplicate `(kind, path)`, and the upgrade path is registered separately by `api-gateway`. Both admission decisions funnel through those two service methods, so one wrap covers every carrier.
 
@@ -383,21 +425,106 @@ Four things that cost time and are worth knowing before writing against this sur
 
 ## What it changes
 
-`cordis.patch.yml` has **one** entry: an override of the `deepseek-account` row that
-`packages/bundle/base/cordis.patch.yml` declares. A patch replaces a row's whole `config`, so
-the entry restates every key that row owns. The insert of `dsharness-host-auth` that used to
-be the second entry is gone — the plugin ships as a bundle package instead, for the reason
-given above.
+`cordis.patch.yml` addresses four rows that upstream already declares. A patch replaces a
+row's whole `config`, so an override restates every key that row owns. No fork-owned plugin
+is inserted here — those ship as bundle packages instead, for the reason given above.
 
-| key | upstream default | this deployment |
+| row | upstream default | this deployment |
 |-----|------------------|-----------------|
-| `platformOrigin` | `https://platform.deepseek.com` | this product's server (`PUBLIC_BASE_URL`) |
-| `desktopPlatform` | `null` | the original expression is kept |
-| `allowLoopbackHttp` | `false` | enabled unless `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0` |
+| `deepseek-account` → `platformOrigin` | `https://platform.deepseek.com` | this product's server (`PUBLIC_BASE_URL`) |
+| `deepseek-account` → `desktopPlatform` | `null` | the original expression is kept |
+| `deepseek-account` → `allowLoopbackHttp` | `false` | enabled unless `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0` |
+| `llm-pi-ai` → `providers.dsharness-relay` | `{}` (no routes) | this product's gateway, shown as 「码农AI」 |
+| `agent-default-model` | `deepseek-official` / `deepseek-flash` | `dsharness-relay` / `deepseek-v4.1-flash` |
+| `llm-deepseek-account` → `disabled` | mounted | `true` — see below |
 
 The installed copy of this file carries a literal origin rather than the `!!js process.env…`
 expression the development copy uses: an installed machine has no environment variable to
 read, and the loader refuses `DSH_`-prefixed names from any `.env`.
+
+### The model route is this product's gateway, not DeepSeek's
+
+Upstream's default selection names `deepseek-official`, whose provider package hardcodes the
+display name `DeepSeek`, the endpoint `api.deepseek.com`, and a catalog containing neither
+`deepseek-v4.1-flash` nor anything else this product serves. Changing that row is not possible
+without editing the package, so the route is declared where upstream leaves room for one:
+`llm-pi-ai` ships mounted but with an empty `providers` dict, and its comment says exactly that
+a settings section is what fills it (`packages/bundle/base/cordis.patch.yml:120-128`). A
+provider profile's dict key **is** the route, and `displayName` is ours to choose:
+
+```yaml
+dsharness-relay:
+  displayName: '码农AI'
+  api: 'openai-completions'
+  baseURL: 'https://ai.czmanong.com/v1'
+  apiKeyEnv: 'DSHARNESS_MODEL_KEY'
+```
+
+`baseURL`, `api` and the model catalog match what `GET /api/config` already delivers
+(`server/src/lib/defaults.ts`), so the model picker and the server agree.
+
+### Why the account-backed model route is switched off
+
+`llm-deepseek-account` authenticates inference with `account.resolveToken(baseURL)` and sends
+what it gets as `x-dsh-auth-token` (`packages/llm/llm-deepseek-account/src/index.ts:20-25`).
+Two facts make that route unusable here, and the second is destructive:
+
+1. `resolveToken` hands out the grant only when the request origin equals `inferenceOrigin`
+   (`packages/credentials/deepseek-account-platform/src/index.ts:385-401`), and this
+   deployment's inference origin is the gateway, which does not read that header at all.
+   Measured on a valid key: `x-dsh-auth-token` → 401, `x-api-key` → 200.
+2. A 401 through that route is handled by `onRequestError`, which calls `rejectToken`
+   (`.../llm-deepseek-account/src/index.ts:26-36`). `rejectToken` → `expireCredential`
+   **deletes the stored grant** and emits `deepseek-account/signed-out`
+   (`.../deepseek-account-platform/src/index.ts:322-344`). So a single failed request signs the
+   user out — which is what "sign in, start a new session, land back on the login page" was.
+
+Only that LLM row is disabled. `deepseek-account` itself (login, balance, bonuses, sign-out)
+must stay mounted or the whole official account surface disappears.
+
+**This is one known sign-out path, not a complete explanation.** The other paths that can
+clear the same credential are: a 401/`code: 40003` from the product's own account endpoints
+(`server/src/lib/dsh-account.ts:84-86`, which `tokenVersion` bumps reproduce after a sign-out
+or a user suspension); and `issuer-mismatch` at startup, which discards the grant without
+sending any request (`.../deepseek-account-platform/src/index.ts:167-176`) — visible in the
+Host log as `stored grant discarded`. Diagnosing a report of "thrown back to login" means
+checking which of the three it was, not assuming this one.
+
+### The delivery step the key needs (`model-key.mjs`)
+
+The product server has always returned the per-user gateway key at
+`GET /api/account/model-access`, and nothing in this fork ever read it: a search for
+`model-access`, `apiKeyCreated` and `dshModelKey` across `client/` was zero hits. So the route
+above had no credential and every request failed with `MISSING_CREDENTIAL`.
+
+`platform/model-key.mjs` is that consumer. On the account session's changes it asks the
+product server for the key and writes it into the credential store under
+`DSHARNESS_MODEL_KEY` — the reference `llm-pi-ai`'s `apiKeyEnv` names — and removes it on
+sign-out or an unauthorized answer. A transport failure keeps the stored key, because a `503`
+says nothing about whether the gateway key is still valid.
+
+### Check for updates (`update.mjs`)
+
+The official updater cannot work on an unsigned build, and not for a configuration reason:
+`publish: null` (`apps/desktop/scripts/electron-builder-config.mjs:249`) means electron-builder
+writes no `app-update.yml` (`app-builder-lib/out/publish/PublishManager.js:87-90`), while
+`update-coordinator.ts:54` requires that file and `:185` throws without it. Reviving it needs
+code signing, which this product does not have.
+
+So `platform/update.mjs` serves the answer itself at `/dsharness/update` (HTML) and
+`/dsharness/update.json`, comparing the installed version against the release the product
+server publishes at `GET /api/config/version`. It reports; it does not download or install.
+
+The installed version comes from `<DSH_HOME>/dsharness-install.json`, written at install time
+by the payload. The installer passes NSIS's `${VERSION}` — which electron-builder defines from
+the packaged app version — because on an unsigned build that is the only witness to what the
+user actually installed.
+
+⚠️ The two release records **are different stores** and both must be written:
+`wb_client_release` (Platform, what the website renders) and the product server's
+`desktopRelease` (what the client reads). Measured drift is why `register-client-release.mjs`
+now writes both: the website advertised `0.2.1-alpha.1.20261007.2` while `/api/config/version`
+still answered `0.2.0`, so a freshly installed client was told it was current.
 
 ### The origin the client is built with must reach this product directly
 
@@ -410,6 +537,7 @@ appended to it:
 | `/api/v0/users/get_user_summary`, `/api/v0/users/get_unnotified_bonuses`, `/api/v0/users/ack_bonus_notified` | `server/src/routes/dsh-account.ts` |
 | `/dsh/authorize`, `/dsh/authorize/complete`, `/dsh/authorized` | `server/src/routes/dsh-account.ts` |
 | `/top_up`, `/usage`, `/api/page/*` | `server/src/routes/pages.ts` |
+| `/api/config`, `/api/config/version` | `server/src/routes/api.ts` (the release the updater page reads) |
 
 So the gateway has to send those paths to the product server's port, and it must do so
 **without stripping a prefix**: `browserUrl()` in the official provider compares
@@ -428,28 +556,3 @@ gateway.
 ### Why one row wires every official login
 
 The official Electron welcome window's Sign in, the Settings account page, the desktop onboarding quota page, and the `deepseek-account` model provider all reach the platform through `ctx.deepseekAccount` and talk only to `platformOrigin`. Pointing that row at this product routes all of them to the official protocol surface in `server/src/routes/dsh-account.ts`, which forwards them to the existing `/api/auth/*` endpoints.
-
-### What is still missing: getting the per-user gateway key into the provider
-
-The gateway does serve the Anthropic Messages format, so no second adapter is
-needed: this product's New API deployment answers `POST /v1/messages` as
-`RelayFormatClaude` (`relay/server/router/relay-router.go`) and accepts the
-credential as `x-api-key` (`relay/server/middleware/auth.go`, `TokenAuth`, which
-maps `x-api-key` to `Authorization: Bearer` for `/v1/messages`).
-
-That makes the official **API-key** provider the right route: `llm-deepseek`
-(`packages/llm/llm-deepseek-api-key`) already sends `x-api-key`, and it only needs
-
-- `baseURL: https://ai.czmanong.com/v1` (Messages requests go to `<root>/messages`),
-- `models` naming this product's catalog,
-- `apiKeyEnv` naming the credential that holds the user's gateway key.
-
-The account provider cannot serve this route: `llm-deepseek-account` sends the
-stored grant as `x-dsh-auth-token`, which the gateway does not read. So the
-account still owns login, balance and sign-out, while inference authenticates
-with the per-user `sk-` that `GET /api/account/model-access` issues.
-
-What is missing is the delivery step: nothing yet fetches that endpoint and
-writes the key into the credentialed `apiKeyEnv` reference on startup and after
-sign-in. The previous shell did it in `src/main/account/provider-sync.ts`; here it
-belongs in a fork-owned plugin row mounted from this layer.

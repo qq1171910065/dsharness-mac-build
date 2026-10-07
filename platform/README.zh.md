@@ -33,17 +33,22 @@ git merge upstream/master      # never conflicts in platform/
 
 ```text
 platform/
-  cordis.patch.yml         deployment rows: point the official login at this product
+  cordis.patch.yml         deployment rows: login origin, model route, and the disabled row
   install.mjs              write those rows, then provision the profile plugins
   provision.mjs            install this product's plugins in the shape the Plugins page can switch
-  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api
+  model-key.mjs            fork-owned plugin: fetch this account's gateway key into the credentials
+  update.mjs               fork-owned plugin: show the installed vs published version
+  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api,
+                           and the /dsharness/gateway page with the port and the secret
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
-  install.test.mjs         the deployment rows (11 cases)
-  provision.test.mjs       the plugin provisioning policy (16 cases)
-  host-auth.test.mjs       the plugin's pure functions (18 cases)
-  deploy-payload.test.mjs  the installer seam: payload, include and profile parity (15 cases)
+  install.test.mjs         the deployment rows and their layer precedence
+  provision.test.mjs       the plugin provisioning policy
+  model-key.test.mjs       the key delivery plugin (20 cases)
+  update.test.mjs          version comparison and the update surface (12 cases)
+  host-auth.test.mjs       the gateway plugin's pure functions and its pages
+  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
@@ -253,7 +258,27 @@ pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是
 | 错密钥 / 过短密钥 | 同上，401 |
 | `Authorization: Bearer <密钥>` | 放行；覆盖 unary RPC **以及** `/api/remote.mux` 升级 |
 | 局域网里的浏览器 | `/dsharness/auth` 用密钥换 cookie，之后 `/` 与 `/api` 都能用 |
-| 密钥未配置或短于 16 位 | 插件什么都不做（一条 warn）；`/api` 保持上游行为 |
+| 密钥未配置 | 首次运行时生成一把并持久化，于是通道能用，也能从 `/dsharness/gateway` 读到 |
+
+### 端口与密钥必须能被读到（`/dsharness/gateway`）
+
+用户报的是「无法对接」，而原因是结构性的：端口与共享密钥只活在进程里。`dsh web` 只在**启动那一次**把 `?token=` 打到终端，而桌面端连终端都没有。所以 `host-auth.mjs` 把这两样都渲染出来：
+
+| 面 | 给什么 |
+|----|--------|
+| `GET /dsharness/gateway` | HTML 页：端口、本机地址、共享密钥、cookie 名、登录页，以及一个复制按钮 |
+| `GET /dsharness/gateway.json` | 同一份事实的 JSON，给调用方与验收脚本用 |
+
+三点是刻意的：
+
+- **只在回环上回**。非回环请求拿到的是说明页，JSON 面直接 `403`。密钥只应在运行 DSH 的这台机器上可读。
+- **端口取自本次请求的 authority**，而不是另存一份配置：`webServer.port` 在配置端口为 `0` 时只有监听之后才知道，而 authority 是调用方**实际打到**的那个 `host:port`，一定是对的。
+- **不带 `?token=`**。`dsh web` 打印的那个是**连接层**的一次性凭据，本插件既拿不到也不需要；把它与共享密钥混在一个 URL 里，只会让「哪个是哪个」永远说不清。
+
+密钥未配置（或太短）时现在改成**生成并持久化**，而不是让插件整体不挂载：部署行总是给出 `token` 键，所以「未配置」才是默认态，而一条会自己关掉的通道没有任何东西可显示。生成的值写进凭据层的 `DSHARNESS_AUTH_TOKEN`，因此跨重启稳定 —— 每次启动都变的密钥，是用户永远抄不下来的密钥。要关掉这条通道只有 `enabled: false`。
+
+两个面都注册成 `kind: 'exact'`，并且在 `authorizeIndex` 上额外放行：`webServer.match()` 先查 exact 表，但 `frontend-static` 会把 index 请求交给 `authorizeIndex`，而它只认 `GET /` —— 不放行的话这两页能不能读到就取决于路由注册谁先赢。
+
 
 它包装的是 `connection.requestRejection` 与 `connection.authorizeIndex`，而不是注册路由 —— 因为 `/api` 已经被占了：`webServer.register` 对同一个 `(kind, path)` 重复注册会抛错，而升级握手那条路由由 `api-gateway` 单独注册。两处准入判断最终都汇到这两个服务方法上，所以**一处包装覆盖全部载体**。
 
@@ -319,18 +344,59 @@ $env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-d
 
 ## 它改了什么
 
-`cordis.patch.yml` 只有**一条**条目：覆盖 `packages/bundle/base/cordis.patch.yml` 声明的
-`deepseek-account` 行。补丁是**整块替换** `config`，所以条目要把该行拥有的键全部重述一遍。
-原来作为第二条的 `dsharness-host-auth` 插入**已经删除** —— 那个插件改成组合包发布，理由见上文。
+`cordis.patch.yml` 改的是上游**已经声明**的四行。补丁是**整块替换** `config`，所以每次覆盖都要把该行拥有的键全部重述一遍。这里**不插入**任何自有插件 —— 它们改成组合包发布，理由见上文。
 
-| 键 | 上游默认 | 本部署 |
+| 行 | 上游默认 | 本部署 |
 |----|----------|--------|
-| `platformOrigin` | `https://platform.deepseek.com` | 本产品 server（`PUBLIC_BASE_URL`） |
-| `desktopPlatform` | `null` | 保留原表达式 |
-| `allowLoopbackHttp` | `false` | 除非 `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0`，否则打开 |
+| `deepseek-account` → `platformOrigin` | `https://platform.deepseek.com` | 本产品 server（`PUBLIC_BASE_URL`） |
+| `deepseek-account` → `desktopPlatform` | `null` | 保留原表达式 |
+| `deepseek-account` → `allowLoopbackHttp` | `false` | 除非 `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0`，否则打开 |
+| `llm-pi-ai` → `providers.dsharness-relay` | `{}`（没有任何 route） | 本产品网关，界面显示「码农AI」 |
+| `agent-default-model` | `deepseek-official` / `deepseek-flash` | `dsharness-relay` / `deepseek-v4.1-flash` |
+| `llm-deepseek-account` → `disabled` | 挂载 | `true` —— 理由见下 |
 
-装好的那份副本里是**字面地址**而不是开发副本用的 `!!js process.env…` 表达式：装好的机器上没有
-环境变量可读，而且加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字。
+装好的那份副本里是**字面地址**而不是开发副本用的 `!!js process.env…` 表达式：装好的机器上没有环境变量可读，而且加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字。
+
+### 模型走本产品网关，不是 DeepSeek 官方
+
+上游默认把模型选成 `deepseek-official`，而那个 provider 包里 `displayName` 硬编码为 `DeepSeek`、端点是 `api.deepseek.com`、目录里既没有 `deepseek-v4.1-flash` 也没有本产品提供的任何模型。改那一行等于改上游包，所以 route 声明在上游留出的位置上：`llm-pi-ai` 默认挂载但 `providers` 是空的，它自己的注释就写着「等到有 `llm-pi-ai:` 配置段来填」（`packages/bundle/base/cordis.patch.yml:120-128`）。provider profile 的 dict 键**就是** route，`displayName` 由我们给：
+
+```yaml
+dsharness-relay:
+  displayName: '码农AI'
+  api: 'openai-completions'
+  baseURL: 'https://ai.czmanong.com/v1'
+  apiKeyEnv: 'DSHARNESS_MODEL_KEY'
+```
+
+`baseURL`、`api` 与模型目录都与 `GET /api/config` 下发的一致（`server/src/lib/defaults.ts`），所以模型选择器与服务端说的是同一件事。
+
+### 为什么要把「账号直连推理」这条 route 关掉
+
+`llm-deepseek-account` 用 `account.resolveToken(baseURL)` 拿凭证，再把拿到的东西当 `x-dsh-auth-token` 发出去（`packages/llm/llm-deepseek-account/src/index.ts:20-25`）。两条事实让它在本产品下走不通，第二条还是**破坏性的**：
+
+1. `resolveToken` 只在请求 origin 等于 `inferenceOrigin` 时才交出 grant（`packages/credentials/deepseek-account-platform/src/index.ts:385-401`），而本部署的推理 origin 是网关，网关**根本不读这个头**。实测（有效 key）：`x-dsh-auth-token` → 401，`x-api-key` → 200。
+2. 这条 route 上的 401 由 `onRequestError` 处理，它会调 `rejectToken`（`.../llm-deepseek-account/src/index.ts:26-36`）。而 `rejectToken` → `expireCredential` 会**删掉本地 grant** 并发 `deepseek-account/signed-out`（`.../deepseek-account-platform/src/index.ts:322-344`）。也就是说**一次请求失败就把用户登出** —— 这正是「登录 → 开新会话 → 回到登录页」。
+
+只关了这一条 LLM route。`deepseek-account`（登录、余额、赠金、退登）必须留着，否则整个官方账号面消失。
+
+**这是已知的一条登出路径，不是全部解释。** 其余能让同一份凭据点失效的路径：产品自己那几个账号端点回 401 / `code: 40003`（`server/src/lib/dsh-account.ts:84-86`；退登或管理端停用会提升 `tokenVersion`，从而复现）；以及启动时的 `issuer-mismatch`，它连一次请求都不发就丢掉 grant（`.../deepseek-account-platform/src/index.ts:167-176`），Host 日志里会留 `stored grant discarded`。排查「被踢回登录」要分清是这三条里的哪一条，不能默认是这一条。
+
+### key 缺的那一步：投递（`model-key.mjs`）
+
+产品 server 一直在 `GET /api/account/model-access` 回该用户的网关 key，而本 fork 里**从来没有东西读它**：在 `client/` 里搜 `model-access`、`apiKeyCreated`、`dshModelKey` 是 **0 处命中**。于是上面那条 route 没有任何凭据，每次请求都以 `MISSING_CREDENTIAL` 失败。
+
+`platform/model-key.mjs` 就是那个消费者。它在账户状态变化时向产品 server 要 key，写进凭据层的 `DSHARNESS_MODEL_KEY`（正是 `llm-pi-ai` 的 `apiKeyEnv` 指的那个引用），并在退登或拿到未授权答复时删掉。传输失败**保留**已写入的 key —— 一个 `503` 说明不了网关 key 还有没有效。
+
+### 检查更新（`update.mjs`）
+
+官方更新通道在未签名构建下用不了，而且不是配置问题：`publish: null`（`apps/desktop/scripts/electron-builder-config.mjs:249`）意味着 electron-builder **不写** `app-update.yml`（`app-builder-lib/out/publish/PublishManager.js:87-90`），而 `update-coordinator.ts:54` 正要求那个文件、`:185` 直接抛错。要恢复它得做代码签名，本产品没有证书。
+
+所以 `platform/update.mjs` 自己给答案：`/dsharness/update`（HTML）与 `/dsharness/update.json`，拿已装版本与产品 server 在 `GET /api/config/version` 发布的版本比。它只**报告**，不下载也不安装。
+
+已装版本来自 `<DSH_HOME>/dsharness-install.json`，由载荷在安装期写下。安装器把 NSIS 的 `${VERSION}` 传进去 —— 那是 electron-builder 按打包版本定义的，而**未签名构建里只有安装器知道用户装的是哪一版**。
+
+⚠️ 两份发布记录是**两个不同的存储**，两边都必须写：`wb_client_release`（Platform，官网渲染它）与产品 server 的 `desktopRelease`（客户端读它）。实测过的漂移就是 `register-client-release.mjs` 现在两边都写的原因：官网写着 `0.2.1-alpha.1.20261007.2`，而 `/api/config/version` 还在回 `0.2.0`，于是刚装好的客户端被告知「已是最新」。
 
 ### 客户端打包时写死的地址必须能直达本产品
 
@@ -342,6 +408,7 @@ $env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-d
 | `/api/v0/users/get_user_summary`、`/api/v0/users/get_unnotified_bonuses`、`/api/v0/users/ack_bonus_notified` | `server/src/routes/dsh-account.ts` |
 | `/dsh/authorize`、`/dsh/authorize/complete`、`/dsh/authorized` | `server/src/routes/dsh-account.ts` |
 | `/top_up`、`/usage`、`/api/page/*` | `server/src/routes/pages.ts` |
+| `/api/config`、`/api/config/version` | `server/src/routes/api.ts`（检查更新页读的发布信息） |
 
 所以网关必须把这些路径送到产品服务的端口，而且**不能吃掉前缀**：官方 provider 的
 `browserUrl()` 会把 `url.pathname` 与字面量 `/dsh/authorize`、`/dsh/authorized` 比对
@@ -356,17 +423,3 @@ $env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-d
 ### 为什么一行就能接通官方全部登录
 
 官方 Electron 欢迎窗口的 Sign in、设置里的账号页、桌面引导的额度页、`deepseek-account` 模型 provider —— 全部经 `ctx.deepseekAccount` 只能和 `platformOrigin` 说话。把这一行指向本产品，它们就都落到 `server/src/routes/dsh-account.ts` 实现的官方协议面上，再由它转发到既有的 `/api/auth/*` 端点。
-
-### 还缺的一环：把每个用户的网关 key 送进 provider
-
-网关**确实提供 Anthropic Messages 格式**，所以不需要第二个适配器：本产品的 New API 部署把 `POST /v1/messages` 当作 `RelayFormatClaude` 处理（`relay/server/router/relay-router.go`），并且接受 `x-api-key` 作为凭据（`relay/server/middleware/auth.go` 的 `TokenAuth` 会把 `/v1/messages` 的 `x-api-key` 映射成 `Authorization: Bearer`）。
-
-因此正确的路径是官方的 **API-key** provider：`llm-deepseek`（`packages/llm/llm-deepseek-api-key`）本来就用 `x-api-key`，它只差
-
-- `baseURL: https://ai.czmanong.com/v1`（Messages 请求会打到 `<root>/messages`），
-- `models` 指向本产品的模型目录，
-- `apiKeyEnv` 指向存放该用户网关 key 的凭据。
-
-账号 provider 走不了这条路：`llm-deepseek-account` 把授权 token 当 `x-dsh-auth-token` 发，而网关不读这个头。所以**账号仍然负责登录、余额与退登**，而推理用 `GET /api/account/model-access` 签发的该用户 `sk-` 认证。
-
-缺的是投递那一步：目前还没有东西在启动与登录后去取那个端点，并把 key 写进那个带凭据的 `apiKeyEnv` 引用。旧壳在 `src/main/account/provider-sync.ts` 里做这件事；在这里它应当是本层挂载的 fork 自有插件行。
