@@ -347,7 +347,8 @@ test('config hook: the environment a packaging run sets is self-consistent', () 
 });
 
 test('package-windows: only an unsigned Windows build may be produced', () => {
-  assert.deepEqual(parseArguments(['--unsigned']), { passthrough: ['--unsigned'], check: false, origin: DEFAULT_PLATFORM_ORIGIN });
+  assert.deepEqual(parseArguments(['--unsigned']),
+    { passthrough: ['--unsigned'], check: false, origin: DEFAULT_PLATFORM_ORIGIN, registry: undefined });
   assert.deepEqual(parseArguments(['--unsigned', '--build-version', '0.2.1-alpha.1.20261007.1']).passthrough,
     ['--unsigned', '--build-version', '0.2.1-alpha.1.20261007.1']);
   assert.deepEqual(parseArguments(['--check']).check, true);
@@ -356,6 +357,23 @@ test('package-windows: only an unsigned Windows build may be produced', () => {
   assert.throws(() => parseArguments(['--unsigned', '--config']), /unknown option/u);
   assert.throws(() => parseArguments(['--unsigned', '--build-version']), /requires a value/u);
   assert.throws(() => parseArguments(['--unsigned', '--platform-origin']), /requires a value/u);
+  assert.throws(() => parseArguments(['--unsigned', '--registry']), /requires a value/u);
+});
+
+test('package-windows: --registry reaches the prepare stage as npm_config_registry', () => {
+  /*
+   * Measured: a run whose registry answered `error (23)` for
+   * `@deepseek-ai/libreoffice-kit-win32-x64` ended in
+   * `desktop runtime: missing required LibreOffice engine win32-x64` — a message
+   * that names the engine, not the download that never happened. Pointing the run
+   * at a mirror fixed it immediately, so the option exists rather than the knowledge.
+   */
+  const parsed = parseArguments(['--unsigned', '--registry', 'https://registry.npmmirror.com']);
+  assert.equal(parsed.registry, 'https://registry.npmmirror.com');
+  assert.deepEqual(parsed.passthrough, ['--unsigned'], 'the registry is ours, not an upstream flag');
+  assert.equal(hookEnvironment('C:/x.mjs', parsed.registry).npm_config_registry, parsed.registry);
+  // Omitted: nothing is set, so the ambient registry keeps working.
+  assert.equal('npm_config_registry' in hookEnvironment('C:/x.mjs'), false);
 });
 
 test('upstream parity: the literal profile an install creates matches initProfile', () => {

@@ -38,8 +38,20 @@
  * unless it is told `--unsigned`, because that is the only Windows build this
  * product publishes and the only one it can verify locally.
  *
+ * ## Why `--registry` exists
+ *
+ * The prepare stage resolves its own dependency closure, and two of those
+ * packages are large optionals. Measured: on a run where `registry.npmjs.org`
+ * answered `error (23)` for `@deepseek-ai/libreoffice-kit-win32-x64`, pnpm gave
+ * up and `prepare-dsh` failed with `desktop runtime: missing required
+ * LibreOffice engine win32-x64` — a message that names the wrong thing, since
+ * the engine was simply never downloaded. Pointing the run at a mirror fixed it
+ * on the first try, so the mirror is reachable as an option instead of being
+ * tribal knowledge.
+ *
  * Usage:
  *   node platform/package-windows.mjs --unsigned [--build-version <version>]
+ *   node platform/package-windows.mjs --unsigned --registry https://registry.npmmirror.com
  *   node platform/package-windows.mjs --check          # inspect without building
  */
 
@@ -71,18 +83,26 @@ const stagedConfig = join(desktopDir, '.desktop-build', 'nsis-config.mjs');
  * Split this script's own command line into the upstream script's arguments and
  * this script's options.
  * @param argv - arguments after the script entry point.
- * @returns the passthrough arguments, whether to check, and the origin to bake.
+ * @returns the passthrough arguments, whether to check, the origin to bake, and
+ *   the registry to resolve the prepare stage through.
  */
 export function parseArguments(argv) {
   const passthrough = [];
   let check = false;
   let origin = DEFAULT_PLATFORM_ORIGIN;
+  let registry;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--check') { check = true; continue; }
     if (argument === '--platform-origin') {
       origin = argv[index + 1];
       if (origin === undefined) throw new Error('package-windows: --platform-origin requires a value');
+      index += 1;
+      continue;
+    }
+    if (argument === '--registry') {
+      registry = argv[index + 1];
+      if (registry === undefined) throw new Error('package-windows: --registry requires a value');
       index += 1;
       continue;
     }
@@ -94,12 +114,12 @@ export function parseArguments(argv) {
       index += 1;
       continue;
     }
-    throw new Error(`package-windows: unknown option ${argument}; expected --unsigned, --dir, --build-version, --platform-origin or --check`);
+    throw new Error(`package-windows: unknown option ${argument}; expected --unsigned, --dir, --build-version, --platform-origin, --registry or --check`);
   }
   if (!check && !passthrough.includes('--unsigned')) {
     throw new Error('package-windows: this product publishes unsigned Windows builds only; pass --unsigned');
   }
-  return { passthrough, check, origin };
+  return { passthrough, check, origin, registry };
 }
 
 /**
@@ -128,18 +148,20 @@ export function stageConfig() {
  * The preload every child Node process receives, with the sentinels the hook reads.
  *
  * @param config - absolute path of the staged electron-builder configuration.
+ * @param registry - optional npm registry for the prepare stage's own resolution.
  * @returns the environment additions for the packaging child.
  */
-export function hookEnvironment(config) {
+export function hookEnvironment(config, registry) {
   return {
     NODE_OPTIONS: `--import ${pathToFileURL(hookModule).href}`,
     DSHARNESS_NSIS_CONFIG_HOOK: '1',
     DSHARNESS_NSIS_CONFIG: config,
+    ...registry === undefined ? {} : { npm_config_registry: registry },
   };
 }
 
 async function main() {
-  const { passthrough, check, origin } = parseArguments(process.argv.slice(2));
+  const { passthrough, check, origin, registry } = parseArguments(process.argv.slice(2));
   const deploy = buildDeployPayload({ origin, check });
   if (!existsSync(installerScript)) throw new Error(`missing ${installerScript}`);
   if (!existsSync(configSource)) throw new Error(`missing ${configSource}`);
@@ -150,6 +172,7 @@ async function main() {
     nsisInclude: installerScript,
     deployEmbedded: deploy,
     platformOrigin: origin,
+    registry: registry ?? '(inherited)',
     arguments: passthrough,
   };
   if (check) {
@@ -160,6 +183,7 @@ async function main() {
   process.stdout.write(`[platform] configuration: ${configSource} (staged at ${config})\n`);
   process.stdout.write(`[platform] NSIS include: ${installerScript}\n`);
   process.stdout.write(`[platform] embedded deploy layer: ${deploy}\n`);
+  if (registry !== undefined) process.stdout.write(`[platform] npm registry: ${registry}\n`);
 
   // The script name already carries win-x64 and --unsigned, so neither is repeated.
   const forwarded = passthrough.filter((argument) => argument !== '--unsigned');
@@ -169,7 +193,7 @@ async function main() {
   ];
   let code;
   try {
-    const env = { ...process.env, ...hookEnvironment(config) };
+    const env = { ...process.env, ...hookEnvironment(config, registry) };
     const child = spawn('pnpm', args, { cwd: clientDir, env, stdio: 'inherit', shell: process.platform === 'win32' });
     code = await new Promise((resolvePromise) => child.once('close', resolvePromise));
   } finally {
