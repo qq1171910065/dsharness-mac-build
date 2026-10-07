@@ -10,6 +10,7 @@ import {
 } from './build-deploy-payload.mjs';
 import { parseArguments, hookEnvironment } from './package-windows.mjs';
 import { readConfigEnvironment, rewriteConfigArgument } from './windows/nsis-config-hook.mjs';
+import { installInto } from './install.mjs';
 import {
   deploy, ensureDesktopProfile, PROFILE_BUNDLES, PROFILE_PATCH_TEMPLATE, PROFILE_PNPM_WORKSPACE, profilesUnder,
 } from './windows/deploy/deploy-entry.mjs';
@@ -184,6 +185,48 @@ test('deploy entry: the Desktop profile is provisioned first, then whatever the 
     mkdirSync(join(home, 'profiles', 'node_modules'), { recursive: true });
     mkdirSync(join(home, 'profiles', 'desktop'), { recursive: true });
     assert.deepEqual(profilesUnder(home), ['desktop', 'web']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The managed home block has to beat the profile's own patch file.
+ *
+ * This is the whole reason the model route can be pinned from a deployment: the
+ * official account surface calls `session.initializeDefaultModel()` on the sign-in
+ * edge (`packages/client/ui-settings-account/src/client/index.ts:117-132`), which
+ * hardcodes `provider = 'deepseek-account'` and persists that choice into the
+ * **profile** layer (`packages/api/session-controller/src/index.ts:298-310`). The
+ * guard meant to prevent that (`hasProviderApiKey`,
+ * `packages/api/session-controller/src/catalog.ts:105`) skips `deepseek-account`
+ * itself, so it never fires for the provider being installed.
+ *
+ * If the profile layer won, every sign-in would silently point the default model at
+ * the account route — which in this deployment answers 401 and whose 401 handler
+ * deletes the stored grant, i.e. "sign in, start a new session, get thrown back to
+ * the login page". The measurement below is the one that decides it, so it is
+ * asserted rather than argued.
+ */
+test('deploy entry: the managed home block overrides what a sign-in writes to the profile layer', () => {
+  const home = temporaryDirectory('deploy-layer-');
+  try {
+    const profileDir = join(home, 'profiles', 'desktop');
+    mkdirSync(profileDir, { recursive: true });
+    // The profile layer, exactly as `initializeDefaultModel` would leave it.
+    writeFileSync(join(profileDir, 'cordis.patch.yml'),
+      '- id: agent-default-model\n  config:\n    provider: deepseek-account\n    model: deepseek-v4.1-flash\n');
+    const block = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
+    installInto(home, block, { write: false });
+    const profilePatch = readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8');
+    assert.match(profilePatch, /provider: deepseek-account/, 'the profile layer really does name the account route');
+    // `readProfilePatches` composes home AFTER profile, so ours is the last word.
+    const layers = [profilePatch, block];
+    const resolved = layers
+      .flatMap((text) => [...text.matchAll(/^- id: agent-default-model\n((?: {2}.*\n)+)/gmu)])
+      .at(-1)[1];
+    assert.match(resolved, /provider: 'dsharness-relay'/, 'the home block must be applied last and win');
+    assert.match(resolved, /model: 'deepseek-v4\.1-flash'/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
