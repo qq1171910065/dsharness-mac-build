@@ -127,6 +127,16 @@ export function pluginInstallSpec(name) {
  */
 export const PROFILE_PLUGINS = [
   {
+    name: 'dsharness-model-key',
+    entry: 'model-key.mjs',
+    rowId: 'dsharness-model-key',
+    title: 'DSH Desktop model key',
+    zhTitle: 'DSH Desktop 模型 Key',
+    description: 'Fetches this account\u2019s own gateway key and stores it for the model route this product ships.',
+    zhDescription: '登录后取本产品为该用户签发的网关 Key，写进模型调用要用的凭据引用。',
+    defaultEnabled: true,
+  },
+  {
     name: 'dsharness-host-auth',
     entry: 'host-auth.mjs',
     rowId: 'dsharness-host-auth',
@@ -135,6 +145,12 @@ export const PROFILE_PLUGINS = [
     description: 'Shared-secret access to the Harness API for this product: mini-program, scripts, other services.',
     zhDescription: '让本产品的服务端与脚本（小程序、巡检、外部系统）用共享密钥访问 Harness API。',
     defaultEnabled: false,
+    configLines: [
+      '        # Empty means unconfigured; the plugin then does nothing and logs one warning.',
+      "        token: !!js process.env.DSH_AUTH_TOKEN ?? ''",
+      '        cookieName: dsharness_auth',
+      '        loginPage: true',
+    ],
   },
 ];
 
@@ -148,21 +164,30 @@ export const PROFILE_PLUGINS = [
  */
 export const MARKETPLACE_PACKAGE = 'dshmarket';
 
-/** The bundle patch a generated package declares. */
+/**
+ * The bundle patch a generated package declares.
+ *
+ * `configLines` carries each plugin's own config block; a plugin without one gets
+ * a row with no `config` key at all, which Cordis accepts and the plugin's own
+ * `resolveConfig` turns into its defaults.
+ *
+ * @param plugin - one {@link PROFILE_PLUGINS} entry.
+ * @returns the patch file contents.
+ */
 function pluginPatch(plugin) {
-  return [
+  const row = [
     '# dsharness bundle patch: one row, mounted only while this bundle is selected.',
     '# The row carries no `disabled`: selection is the switch the Plugins page writes.',
     '- insert:',
     `    - id: ${plugin.rowId}`,
     '      name: ./index.mjs',
-    '      config:',
-    '        # Empty means unconfigured; the plugin then does nothing and logs one warning.',
-    "        token: !!js process.env.DSH_AUTH_TOKEN ?? ''",
-    '        cookieName: dsharness_auth',
-    '        loginPage: true',
-    '',
-  ].join('\n');
+  ];
+  if (plugin.configLines !== undefined) {
+    row.push('      config:');
+    row.push(...plugin.configLines);
+  }
+  row.push('');
+  return row.join('\n');
 }
 
 /** `package.json` for a generated plugin package. */

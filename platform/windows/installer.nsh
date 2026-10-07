@@ -55,6 +55,7 @@ Function .onInstSuccess
   File "${__FILEDIR__}\deploy\provision.mjs"
   File "${__FILEDIR__}\deploy\install.mjs"
   File "${__FILEDIR__}\deploy\host-auth.mjs"
+  File "${__FILEDIR__}\deploy\model-key.mjs"
   File "${__FILEDIR__}\deploy\cordis.patch.yml"
 
   ; The application ships its own Node runtime, so no system Node is required.

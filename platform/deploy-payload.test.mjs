@@ -92,6 +92,52 @@ test('deploy payload: the committed patch carries the production origin', () => 
   assert.doesNotMatch(text, /DSH_PLATFORM_ORIGIN/, 'the installed copy must not depend on an environment variable');
 });
 
+test('deploy payload: the installed rows select this product\u2019s model route', () => {
+  const text = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
+  /*
+   * Four rows decide where a conversation actually goes, and every one of them is
+   * asserted here because a wrong value is invisible until a user's first message
+   * fails (or, worse, until their stored grant is deleted):
+   *
+   * - `llm-pi-ai.providers.dsharness-relay` is the route: this product's gateway,
+   *   the OpenAI-compatible protocol it serves, and the per-user key reference.
+   * - `agent-default-model` names that route and `deepseek-v4.1-flash`.
+   * - `llm-deepseek-account` is DISABLED: it sends the account grant as
+   *   `x-dsh-auth-token`, which this gateway does not read, and a 401 through it
+   *   calls `rejectToken` and deletes the stored grant — signing the user out.
+   */
+  assert.match(text, /^ {6}dsharness-relay:$/mu);
+  assert.match(text, /^ {8}displayName: '码农AI'$/mu);
+  assert.match(text, /^ {8}api: 'openai-completions'$/mu);
+  assert.match(text, /^ {8}baseURL: 'https:\/\/ai\.czmanong\.com\/v1'$/mu);
+  assert.match(text, /^ {8}apiKeyEnv: 'DSHARNESS_MODEL_KEY'$/mu);
+  // Top-level rows: this file is a YAML sequence, so only the rows nested under an
+  // `insert:` are indented.
+  assert.match(text, /^- id: agent-default-model$/mu);
+  assert.match(text, /^ {4}provider: 'dsharness-relay'$/mu);
+  assert.match(text, /^ {4}model: 'deepseek-v4\.1-flash'$/mu);
+  assert.match(text, /^- id: llm-pi-ai$/mu);
+  const account = /^- id: llm-deepseek-account\n(?:.*\n)*?(?=\n- id: |\n#|$)/mu.exec(text);
+  assert.ok(account !== null, 'the account-backed LLM row must still be addressed');
+  assert.match(account[0], /^ {2}disabled: true$/mu);
+});
+
+test('deploy payload: the shipped key reference matches the plugin that writes it', async () => {
+  // Two files name the credential: the route's `apiKeyEnv` and the plugin that
+  // stores it. A mismatch is a silent `MISSING_CREDENTIAL` on every request, so the
+  // pair is compared rather than each being checked against a literal.
+  const { DEFAULT_REF } = await import('./model-key.mjs');
+  const { PROFILE_PLUGINS } = await import('./provision.mjs');
+  const text = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
+  assert.match(text, new RegExp(`apiKeyEnv: '${DEFAULT_REF}'`, 'u'));
+  // The row is inserted by the provisioned package's own patch, so it is NOT in this
+  // file; what must hold here is that the plugin writing {@link DEFAULT_REF} is one
+  // of the packages provisioning ships.
+  const writer = PROFILE_PLUGINS.find((plugin) => plugin.entry === 'model-key.mjs');
+  assert.ok(writer !== undefined, 'provisioning must ship the plugin that writes the key');
+  assert.equal(writer.defaultEnabled, true, 'a model route with no credential fails every request');
+});
+
 test('installer include: opens with the upstream include and stays pure ASCII', () => {
   const bytes = readFileSync(installer);
   assert.equal(bytes.filter((byte) => byte > 0x7f).length, 0, 'makensis rejects a non-ASCII byte in an include without a BOM');

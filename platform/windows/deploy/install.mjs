@@ -21,14 +21,17 @@
  *
  * ## What belongs in the managed block, and what does not
  *
- * Only **config overrides of rows upstream already declares** -- today that is the
- * account row's `platformOrigin`. Fork-owned plugins are **not** inserted here:
- * they are provisioned as real bundle packages by {@link provisionAll}, so the
- * official Plugins page can show and switch them. A row inserted from this file
- * would belong to no package, so the page would never list it — and a `disabled`
- * written here would be applied **after** the profile layer, so the page's own
- * switch could never override it. `platform/cordis.patch.yml` carries the
- * measurement and the reasoning.
+ * Only **changes to rows upstream already declares**: the account row's
+ * `platformOrigin`, the model route (`llm-pi-ai`'s `dsharness-relay` provider and
+ * the default selection in `agent-default-model`), and the one row this deployment
+ * must switch off (`llm-deepseek-account`, whose 401 handling deletes the stored
+ * account grant). No new plugin is inserted here: fork-owned plugins are
+ * **provisioned as real bundle packages** by {@link provisionAll}, so the official
+ * Plugins page can show and switch them. A row inserted from this file would belong
+ * to no package, so the page would never list it — and an enablement flag written
+ * here for one of *our* rows would be applied **after** the profile layer, so the
+ * page's own switch could never override it. `platform/cordis.patch.yml` carries the
+ * measurement, the reasoning, and why an upstream row is the exception.
  *
  * ## Why the managed block, and why no YAML library
  *
@@ -161,12 +164,15 @@ function main() {
    * that write is the one thing a dry run does do.
    */
   process.stdout.write(`[platform] ${dryRun ? 'would write' : 'wrote'} ${target}\n`);
-  process.stdout.write('[platform] managed rows: deepseek-account (config only)\n');
+  process.stdout.write('[platform] managed rows: deepseek-account, llm-pi-ai (dsharness-relay), agent-default-model, llm-deepseek-account (disabled)\n');
   for (const line of describeReports(reports, dryRun)) process.stdout.write(`${line}\n`);
   process.stdout.write(`[platform] account origin: ${origin}\n`);
+  process.stdout.write('[platform] model route: dsharness-relay -> https://ai.czmanong.com/v1 (码农AI), default deepseek-v4.1-flash\n');
   // Never print the secret itself, only whether one is present.
   process.stdout.write(
-    `[platform] host auth token: ${token.length >= 16 ? `configured (${token.length} chars)` : 'NOT configured (Set DSH_AUTH_TOKEN; the plugin stays usable but does nothing)'}\n`,
+    `[platform] host auth token: ${token.length >= 16
+      ? `configured (${token.length} chars)`
+      : 'not set; the gateway plugin generates and stores one on first run and shows it at /dsharness/gateway'}\n`,
   );
 }
 

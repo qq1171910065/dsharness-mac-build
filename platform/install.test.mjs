@@ -122,16 +122,38 @@ test('the shipped cordis.patch.yml inserts no fork-owned plugin row', () => {
 });
 
 /**
- * A default state must never live in this layer.
+ * Enablement of the bundles this product ships is never decided here.
  *
  * Measured with the real `applyEntryPatches`, this file is applied **after** the
- * profile's own patch, so a `disabled` here would be the last word: the Plugins
- * page's `setPluginEnabled` writes into the profile layer, and the switch would
- * appear to do nothing.
+ * profile's own patch, so a `disabled` written for one of our own bundle rows would
+ * be the last word: the Plugins page's `setBundleEnabled` writes into the profile
+ * layer, and the switch would appear to do nothing. Which of our plugins starts
+ * switched on is expressed once, in `PROFILE_PLUGINS[...].defaultEnabled`.
+ *
+ * The one `disabled:` this file IS allowed — and required — to state is for an
+ * **upstream-declared** row that must not run in this deployment at all, because no
+ * Plugins-page switch governs it and leaving it enabled breaks the product. Today
+ * that is `llm-deepseek-account`: it sends the account grant as `x-dsh-auth-token`
+ * to the model endpoint, this product's gateway does not read that header, and the
+ * resulting 401 drives `rejectToken` → `expireCredential`, which deletes the stored
+ * grant (`packages/credentials/deepseek-account-platform/src/index.ts:322-344`) and
+ * signs the user out. So the assertion is two-sided rather than a blanket ban.
  */
-test('the shipped cordis.patch.yml states no default enablement', () => {
+test('the shipped cordis.patch.yml states no default enablement for a shipped bundle', () => {
   const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
-  assert.ok(!/^\s*disabled:/m.test(text), 'enablement belongs to the bundle selection, not this layer');
+  // No row we ship may carry a disabled flag: that belongs to the selection.
+  for (const plugin of PROFILE_PLUGINS) {
+    const block = new RegExp(`^- id: ${plugin.name}\\n(?:.*\\n)*?(?=\\n- |\\n#|$)`, 'mu').exec(text);
+    assert.equal(block, null, `${plugin.name} must not be addressed by this layer at all`);
+  }
+  // The only row allowed to be switched off is the account-backed LLM route, and it
+  // must be, for the reason in the comment above.
+  const disabled = [...text.matchAll(/^- id: ([A-Za-z0-9-]+)\n(?:.*\n)*?(?=\n- id: |\n#|$)/gmu)]
+    .filter((match) => /^\s+disabled: true$/mu.test(match[0]))
+    .map((match) => match[1]);
+  assert.deepEqual(disabled, ['llm-deepseek-account'],
+    'the account-backed LLM route is the one upstream row this deployment must switch off; '
+    + 'any other disabled row would silently remove a capability or make a Plugins switch inert');
 });
 
 test('installInto: writes the rows and provisions the profile plugins', () => {

@@ -50,7 +50,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_PLATFORM_ORIGIN = 'https://www.czmanong.com';
 
 /** Payload modules copied verbatim from `platform/`. */
-export const PAYLOAD_MODULES = ['home.mjs', 'provision.mjs', 'install.mjs', 'host-auth.mjs'];
+export const PAYLOAD_MODULES = ['home.mjs', 'provision.mjs', 'install.mjs', 'host-auth.mjs', 'model-key.mjs'];
 
 /** The row file whose `platformOrigin` line the build rewrites. */
 const PATCH_SOURCE = 'cordis.patch.yml';

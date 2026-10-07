@@ -40,6 +40,82 @@
     attemptTimeoutMs: 600000
 
 # ---------------------------------------------------------------------------
+# 模型渠道：本产品自己的网关，不是 DeepSeek 官方
+#
+# 上游把默认模型选成 `agent-default-model: {provider: deepseek-official,
+# model: deepseek-flash}`，而 `deepseek-official` 这个 route 由
+# `@deepseek-ai/dsh-llm-deepseek-api-key` 提供，displayName 硬编码为 `DeepSeek`、
+# 端点是 api.deepseek.com（`llm-deepseek/src/config.ts:106` 的 PUBLIC_BASE_URL），
+# 目录里也只有 `deepseek-flash` / `deepseek-v4-pro`。
+#
+# 所以「默认就是本产品网关、默认就是 deepseek-v4.1-flash」**不能**靠改那一行实现 ——
+# 那要改上游包的 displayName 与模型目录。改用上游本来就提供、且默认挂载但空着的
+# `llm-pi-ai`（`packages/bundle/base/cordis.patch.yml:127` 注释写的就是
+# 「zero routes … until a `llm-pi-ai:` settings section supplies provider
+# profiles」）：profile 的 key 就是 route，displayName 由我们给。
+#
+# `baseURL`/`api`/`models`/`defaultModelId` 与 `/api/config` 下发的是同一份口径
+# （`server/src/lib/defaults.ts`）：网关公开入口 + /v1、openai-completions、
+# 目录里只有 deepseek-v4.1-flash。`apiKeyEnv` 指向本产品为每个用户签发的
+# sk-（由 `platform/model-key.mjs` 在登录后写进凭据层）。
+#
+# `agent-default-model` 是**覆盖**（上游已声明这一行），配置也是整块替换。
+- id: llm-pi-ai
+  config:
+    providers:
+      dsharness-relay:
+        displayName: '码农AI'
+        api: 'openai-completions'
+        baseURL: 'https://ai.czmanong.com/v1'
+        apiKeyEnv: 'DSHARNESS_MODEL_KEY'
+        models:
+          - id: 'deepseek-v4.1-flash'
+            name: 'DeepSeek V4.1 Flash'
+            contextWindow: 262144
+            maxTokens: 32768
+            input: ['text', 'image']
+
+- id: agent-default-model
+  config:
+    provider: 'dsharness-relay'
+    model: 'deepseek-v4.1-flash'
+
+# ---------------------------------------------------------------------------
+# 关掉「账号直连推理」这条 route
+#
+# `llm-deepseek-account`（`@deepseek-ai/dsh-llm-deepseek-account`）拿
+# `ctx.deepseekAccount.resolveToken(baseURL)` 的**本地会话 JWT**，当作
+# `x-dsh-auth-token` 发给 `baseURL`。而本产品那条 grant 只对**本产品的
+# server** 有效（`resolveToken` 也只在 `new URL(baseURL).origin === inferenceOrigin`
+# 时才返回它）——发给任何别的主机都是 401。
+#
+# 它俩在本产品下都走不通，而且 401 那条是**破坏性的**
+# （`llm-deepseek-account/src/index.ts:26-36`）：
+#
+#   if (error.failure.status !== 401) return error
+#   const rejected = new LlmError(error.message, 'ACCOUNT_TOKEN_INVALID', …)
+#   try { await account?.rejectToken(token) } catch { … }
+#   return rejected
+#
+# `PlatformAccount.rejectToken` → `expireCredential` 会
+# **`credentials.deleteRecord(KEY)` 删掉本地 grant**，再发
+# `deepseek-account/signed-out`（`deepseek-account-platform/src/index.ts:322-344`）。
+# 也就是说：任何一次 401 都会把用户**登出**。
+#
+# 实测这个网关不认 `x-dsh-auth-token`（同一个有效 key：`x-dsh-auth-token` 401、
+# `x-api-key` 200），所以这条 route 在本产品下只会产生 401 —— 一旦被选中就是
+# 「用着用着回到登录页」。它必须**关掉**，而不是「留着不用」。
+#
+# ⚠️ 这条 route 被选中只是**已知的一条**登出路径，不是全部：见 README
+# 「会话为什么会掉」一节列出的其余候选与各自需要什么证据。
+#
+# 注意**只关 LLM 这一条**：`deepseek-account`（登录/余额/退登那一条，
+# `@deepseek-ai/dsh-deepseek-account-platform`）必须留着，否则整个官方账号面消失。
+- id: llm-deepseek-account
+  disabled: true
+  config: {}
+
+# ---------------------------------------------------------------------------
 # 本 fork 自己的插件**不在这份清单里**
 #
 # 这里曾有一条 `insert`，把 `platform/host-auth.mjs` 直接插进 Loader。
