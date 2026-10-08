@@ -212,14 +212,20 @@ export const REPLACED_PLUGINS = [
  *
  * ## Why the page needs a different layer from the runtime
  *
- * The runtime and the page answer the same question from two different places, and
- * the home layer is only read by one of them:
+ * The runtime and the page answer the same question from two different places, and the
+ * home layer can serve neither:
  *
  * - **Runtime.** `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63`)
  *   composes *bundle layers → the profile's patch → `$DSH_HOME/cordis.patch.yml` → overlays*
- *   and applies them to the entry list with last-write-wins per row id, so the
- *   `llm-pi-ai` row `platform/cordis.patch.yml` writes into the home layer is what
- *   `--dump-config` prints and what the adapter actually serves.
+ *   and applies them to the entry list with last-write-wins per row id. The row written here
+ *   is therefore the last one carrying this id that the runtime sees, and it is what
+ *   `--dump-config` prints and what the adapter actually serves. The home layer no longer
+ *   carries a copy: because it is applied *after* this one, a `config:` there would be the
+ *   last word, and `ConfigEditor.edit()` refuses any write whose namespace the home layer
+ *   overrides (`config-editor/src/index.ts:136-141`) — every 设置 › 模型 write would throw
+ *   `Configuration for "llm-pi-ai" is overridden by a home patch or command-line overlay`,
+ *   which is what 「home 层占了 llm-pi-ai 这个 id，导致无法添加自定义模型 api 了」 was.
+ *   `platform/cordis.patch.yml` states the invariant; `install.test.mjs` asserts it.
  * - **The page.** `ConfigEditor.configuration()`
  *   (`packages/boot/config-editor/src/index.ts:49-70`) never reads the home layer. It
  *   loads *bundle layers + the profile's patch*, then takes the **first** row per id:
@@ -406,15 +412,17 @@ function catalogBodyOf(id) {
  * Whether writing the catalog would **change what the runtime serves**.
  *
  * The home layer is what `readProfilePatches`
- * (`packages/boot/app-boot/src/profile-context.ts:63`) applies last for the runtime, so
- * composing it with the profile layer answers whether a profile row would take over a
- * value that is currently somebody else's:
+ * (`packages/boot/app-boot/src/profile-context.ts:63`) applies last for the runtime. This
+ * deployment writes no catalog row there any more, so the only way a home answer exists
+ * for one of these ids is an operator's own row — and composing it with the profile layer
+ * answers whether the row about to be written would then be shadowed:
  *
  * - nothing composes for the id → writing it is the only way that id ever reaches the
  *   page, and the runtime keeps the bundle default, so this is not drift;
  * - the composed value is this deployment's → the profile row is a no-op for the runtime;
- * - anything else → an operator replaced the deployment's own row outside the managed
- *   block, and the page would then show a catalog the runtime does not use.
+ * - anything else → an operator answered for the id in the home layer, and since that
+ *   layer wins for the runtime while the **page** takes the first row (the profile's), a
+ *   profile row here would show a catalog the runtime does not use.
  *
  * The last case defers rather than writes: the operator's catalog stays the only
  * catalog, and the page keeps its inherited state. That is deliberate — this row is
@@ -424,7 +432,7 @@ function catalogBodyOf(id) {
  *
  * @param profileDir - the profile directory.
  * @param ids - the ids being considered.
- * @returns whether any of them would take a value away from the home layer.
+ * @returns whether any of them would be shadowed by the home layer.
  */
 function catalogDrift(profileDir, ids) {
   const home = readOptional(join(dirname(dirname(profileDir)), 'cordis.patch.yml'));
@@ -447,8 +455,8 @@ function catalogDrift(profileDir, ids) {
  * - the managed block exists: it is this layer's, and rewriting it would undo edits
  *   the settings page made in place;
  * - composing the home layer with the profile layer yields a value that is not this
- *   deployment's: an operator replaced the managed home block, and a profile row
- *   would silently win over it.
+ *   deployment's: an operator answered for the id inside the home layer, which wins for
+ *   the runtime, so a profile row would show the page a catalog the runtime ignores.
  *
  * @param profileDir - the profile directory.
  * @returns the ids to write, in {@link MODEL_CATALOG_ROWS} order.

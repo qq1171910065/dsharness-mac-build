@@ -27,15 +27,17 @@ git merge upstream/master      # never conflicts in platform/
 
 1. profile 补丁层（`cordis.patch.yml`）按 `id` 覆盖或停用某一行；
 2. cordis 插件包（Host 半边用 `dsh.bundle.patch`，浏览器半边用 `dsh.client`）增加能力；
-3. 机器级 host 配置（`$DSH_HOME/cordis.patch.yml`）对**每个** profile 生效，包括应用自己拥有的 `desktop` —— 但**只放配置覆盖**；自有插件改成组合包（下一节），这样官方插件页上它是一张真正的卡片。
+3. 机器级 host 配置（`$DSH_HOME/cordis.patch.yml`）对**每个** profile 生效，包括应用自己拥有的 `desktop` —— 但**只对设置页不写的行**；对它管的那类命名空间写 `config:` 是把设置页锁死，不是给默认值（见下面「模型走本产品网关」一节）。自有插件改成组合包（下一节），这样官方插件页上它是一张真正的卡片。
 
 ## 目录
 
 ```text
 platform/
-  cordis.patch.yml         deployment rows: login origin, model route, and the disabled row
-  install.mjs              write those rows, then provision the profile plugin
-  provision.mjs            install this product's one bundle package and retire the four it replaced
+  cordis.patch.yml         deployment rows: the login origin, and the two upstream routes this
+                           deployment switches off — no page-writable `config:` (see below)
+  install.mjs              write those rows, then provision the profile plugin and its catalog
+  provision.mjs            install this product's one bundle package, retire the four it replaced,
+                           and write the model catalog into each profile's own patch layer
   dsharness.mjs            the product's own bundle, host half: the local gateway, the model-key
                            delivery loop, the update check, and the /dsharness/status.json status
                            face plus the on-demand /dsharness/secret.json value face
@@ -45,11 +47,11 @@ platform/
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
-  install.test.mjs         the deployment rows and their layer precedence (14 cases)
+  install.test.mjs         the deployment rows, their layer precedence, and the rows this layer must never regain (15 cases)
   provision.test.mjs       the plugin provisioning policy, the retired-package migration, and the model catalog (34 cases)
   dsharness.test.mjs       the merged bundle's host components and the status + value faces (76 cases)
   dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel, the copy buttons (22 cases)
-  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (23 cases)
+  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (24 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
@@ -88,7 +90,7 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关也记在同一个文件里；随后它把本产品自带的插件 provision 进每个它能找到的 profile（见下面「自有插件是真正的组合包」）。`--no-marketplace` 不动社区插件市场；`--check` 只报告不写；`--remove` 收回受管行、我们生成的包、依赖项、选中项，以及它写进每个 profile 自己 patch 文件里的模型目录块（见下面模型目录那一节）。
+脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关也记在同一个文件里；随后它把本产品自带的插件 provision 进每个它能找到的 profile（见下面「自有插件是真正的组合包」）。它的受管行是 `deepseek-account`，加上它关掉的两条上游 route：`llm-deepseek` 与 `llm-deepseek-account`；它**刻意不带**任何「设置页会写的命名空间」的 `config:`。`--no-marketplace` 不动社区插件市场；`--check` 只报告不写；`--remove` 收回受管行、我们生成的包、依赖项、选中项，以及它写进每个 profile 自己 patch 文件里的模型目录块（见下面模型目录那一节）。
 
 `DSHARNESS_SKIP_INSTALL=1` 会让 `dev-all.ps1` 传 `--no-marketplace` —— 那个开关本来就意味着「这里别联网」。
 
@@ -256,7 +258,7 @@ update: {}
 [home(insert, neutral),   profile(disabled=false)]      → disabled=false
 ```
 
-即：写进我们受管块的默认态会成为最后一句话，插件页的开关**永远打不开**。让包自己拥有那一行就把这个问题整个消掉：`platform/cordis.patch.yml` 现在只在原处留一段说明，而 `install.test.mjs` 断言那里不再有任何自有 insert、也没有任何 `disabled:`。让这个包的这一行**关不掉**的是它自己 patch 里的另一行，下一节说。
+即：写进我们受管块的默认态会成为最后一句话，插件页的开关**永远打不开**。让包自己拥有那一行就把这个问题整个消掉：`platform/cordis.patch.yml` 现在只在原处留一段说明，而 `install.test.mjs` 断言那一层**根本不提**任何自有行。它唯独允许、也要求存在的 `disabled:` 是两条**上游** route —— 本部署必须关掉，而它们都不归插件页的开关管。让本产品这个包的这一行**关不掉**的是它自己 patch 里的另一行，下一节说。
 
 #### 本产品这个组合包不能关闭、也不能卸载
 
@@ -399,16 +401,17 @@ $env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-d
 
 ## 它改了什么
 
-`cordis.patch.yml` 改的是上游**已经声明**的四行。补丁是**整块替换** `config`，所以每次覆盖都要把该行拥有的键全部重述一遍。这里**不插入**任何自有插件 —— 它改成组合包发布，理由见上文。
+`cordis.patch.yml` 只改上游**已经声明**的行，而且只改设置页不写的那些。补丁是**整块替换** `config`，所以每次覆盖都要把该行拥有的键全部重述一遍。这里**不插入**任何自有插件 —— 它改成组合包发布，理由见上文。
 
 | 行 | 上游默认 | 本部署 |
 |----|----------|--------|
 | `deepseek-account` → `platformOrigin` | `https://platform.deepseek.com` | 本产品 server（`PUBLIC_BASE_URL`） |
 | `deepseek-account` → `desktopPlatform` | `null` | 保留原表达式 |
 | `deepseek-account` → `allowLoopbackHttp` | `false` | 除非 `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0`，否则打开 |
-| `llm-pi-ai` → `providers.dsharness-relay` | `{}`（没有任何 route） | 本产品网关，界面显示「码农AI」 |
-| `agent-default-model` | `deepseek-official` / `deepseek-flash` | `dsharness-relay` / `deepseek-v4.1-flash` |
-| `llm-deepseek-account` → `disabled` | 挂载 | `true` —— 理由见下 |
+| `llm-deepseek` → `disabled` | 挂载 | `true` —— 内置的那张 DeepSeek 卡片，见下 |
+| `llm-deepseek-account` → `disabled` | 挂载 | `true` —— 它的 401 会把用户登出，见下 |
+
+`llm-pi-ai` 与 `agent-default-model` **已经不在这张表里**，而这正是下一节的重点：两者都是「设置 › 模型」会写的命名空间，而在这层给它们写 `config:` 不是给默认值，是让设置页**每一次写入都被拒**。
 
 装好的那份副本里是**字面地址**而不是开发副本用的 `!!js process.env…` 表达式：装好的机器上没有环境变量可读，而且加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字。
 
@@ -426,6 +429,34 @@ dsharness-relay:
 
 `baseURL`、`api` 与模型目录都与 `GET /api/config` 下发的一致（`server/src/lib/defaults.ts`），所以模型选择器与服务端说的是同一件事。
 
+#### home 层给「可写命名空间」写 `config:` 就是把设置页锁死
+
+上面那两行原先**两个**补丁层都写 —— profile 自己那份和这份文件。那是个 bug，用户就是这么报的：
+
+> home 层占了 llm-pi-ai 这个 id，导致无法添加自定义模型 api 了，给我优化一下
+
+`readProfilePatches`（`packages/boot/app-boot/src/profile-context.ts:63-73`）把 home 层排在 profile 层**之后**，而 `ConfigEditor.edit()`（`packages/boot/config-editor/src/index.ts:136-141`）只在「重新合成后的生效配置」等于「即将写入的值」时才接受写入。所以 home 层一旦给设置页会写的命名空间写了 `config:`，那一项就再也改不动了，每次写入都抛：
+
+```text
+Configuration for "llm-pi-ai" is overridden by a home patch or command-line overlay
+```
+
+用真 `composeEntries` 正反各测一次：home 行在时该命名空间合成成 `providers: ["dsharness-relay"]`，写入被拒；把 home 行去掉后合成成 `["dsharness-relay","my-custom-api"]`，写入被接受。`agent-default-model` 有同一个缺陷，出口也一样 —— `AgentDefaultModelConfig.saveSelection()`（`packages/core/agent-default-model/src/index.ts:82-94`）走的是同一个 `configEditor.edit`，那是编辑器里选模型保存的地方 —— 所以它也一起离开了这一层。
+
+由此得出的规矩，也是 `install.test.mjs` 现在断言的东西：**本层只允许给「设置页不拥有」的行写 `config:`**。今天只有 `deepseek-account`（登录面自己那一行）与 `llm-deepseek-account`（停用，并把 `config` 显式清空）；`llm-pi-ai` 与 `agent-default-model` 必须保持「设置 › 模型」可写。
+
+从已发布的 `.20261008.2` 升上来的机器会在下一次 provision 时**自愈**：把那个版本的 home 文件拷进临时 home 再跑新的 `install.mjs`，受管行从 `[deepseek-account, llm-pi-ai, agent-default-model, llm-deepseek-account]` 变成 `[deepseek-account, llm-deepseek, llm-deepseek-account]`。
+
+#### 内置的 DeepSeek 卡片默认关掉，官方模型改成自己添加
+
+> 原本自带的deepseek这个模型配置可以去掉，添加模型供应商时可以选择添加官方的模型。但是默认的可以去掉，默认的只有码农ai这一个模型服务
+
+那张卡片就是 `deepseek-official` 这条 route，由 `llm-deepseek` 这一行注册（`packages/llm/llm-deepseek-api-key/src/index.ts:15,36-38`），`settingsPath: []`。空的 `settingsPath` 在模型页的定义里「永远已配置」（`ui-settings-models/src/client/store.ts:205-206`），于是它永远出现在卡片列表（`ModelsSection.tsx:341,398`），而且既不可 add（`:343-346`）也不可 remove（`:208-210`）。也就是说：**没有任何「不改上游」的口子能在保留这条 route 的同时把它藏起来**；唯一的杠杆就是在部署层关掉它，本文件正是这么做的 —— 与旁边那条 `llm-deepseek-account` 停用同一个动作。
+
+关掉它**不等于**官方模型不可用，官方模型改走「添加提供商」那条路：`llm-pi-ai` 把已装 pi-ai 目录里的**每一个** provider 都声明成可配置项（`llm-pi-ai/src/index.ts:241-250` 加它的 `directoryEntries`），而那个目录里有 `deepseek`（`https://api.deepseek.com`，模型 `deepseek-flash`＝DeepSeek V4.1 Flash 与 `deepseek-v4-pro`）。未配置的目录项正是「添加模型提供商 › 第三方模型提供商」列出的东西。实测：目录下拉里有 41 个选项，其中包含 `deepseek`；添加后提示 `已保存 deepseek。`，编辑器里的模型选择器随即出现一条可用 route。
+
+只影响 llm 这一条 route：`web-search-deepseek` 注册进的是自己的 `ctx.web` 身份（`web-search-deepseek/src/provider.ts:27`），从不碰 `ctx.llm`，所以联网搜索那家的 DeepSeek provider 照旧。想把内置卡片要回来的逃生口就是**删掉本文件里的 `llm-deepseek` 那一行** —— 它不带 `config`，删掉即恢复上游行为，别的什么都不用动。
+
 ### 「设置 › 模型」页的目录读的是 profile 自己的 patch 层
 
 用户口径：模型目录要默认配好，且输入类型要支持文本和图片：
@@ -439,9 +470,11 @@ dsharness-relay:
 | 运行时（`readProfilePatches`） | bundle 层 → profile patch → home patch → overlay | **后者** |
 | 设置 › 模型（`ConfigEditor.configuration()`，`packages/boot/config-editor/src/index.ts:49-70`） | 只有 bundle 层 + profile patch | **前者** |
 
-「同 id 取第一行」正是 home 层修不了这个页面的原因：每个 profile 的 bundle 列表都以 `@deepseek-ai/dsh-base` 开头，而那个 bundle 自己就声明了 `- id: llm-pi-ai`（`packages/bundle/base/cordis.patch.yml:127`）且没有 `providers`，于是卡片继承的就是这条空行。而写在 **profile 自己那份** patch 里的行**确实**能赢（它会成为卡片的 override，渲染成「已自定义模型目录」+「恢复默认模型」），所以目录写在那儿。
+「同 id 取第一行」正是 bundle 层覆盖修不了这个页面的原因：每个 profile 的 bundle 列表都以 `@deepseek-ai/dsh-base` 开头，而那个 bundle 自己就声明了 `- id: llm-pi-ai`（`packages/bundle/base/cordis.patch.yml:127`）且没有 `providers`，于是卡片继承的就是这条空行。而写在 **profile 自己那份** patch 里的行**确实**能赢（它会成为卡片的 override，渲染成「已自定义模型目录」+「恢复默认模型」），所以目录写在那儿。
 
-`provision.mjs` 因此把一个受管块写进**每个 profile 自己的 `cordis.patch.yml`**，里面就是 home 层那两行：
+home 层同样不是它的选项，而且这是**第二个独立理由**：home 层排在 profile 层之后，给可写命名空间写 `config:` 会让设置页的每一次写入都被拒（就是上面说的那把锁）。两个约束指向同一层，所以目录只有一个落点：
+
+`provision.mjs` 把一个受管块写进**每个 profile 自己的 `cordis.patch.yml`**：
 
 ```yaml
 # >>> dsharness model catalog
@@ -469,17 +502,19 @@ dsharness-relay:
 # <<< dsharness model catalog
 ```
 
-`MODEL_CATALOG_ROWS` 就是这一对；`ensureProfileCatalog` 负责写，`missingCatalogRows` 决定要不要写，`removeProfileCatalog` 收回（`install.mjs --remove` 会调它），`provisionProfile` 把写进去的内容报成 `catalog`。**`platform/cordis.patch.yml` 刻意没改** —— home 层仍然是这两行在运行时那一侧的副本，而熟悉 `install.mjs` 的读者本来会以为它们在那里。
+`MODEL_CATALOG_ROWS` 就是这一对；`ensureProfileCatalog` 负责写，`missingCatalogRows` 决定要不要写，`removeProfileCatalog` 收回（`install.mjs --remove` 会调它），`provisionProfile` 把写进去的内容报成 `catalog`。**`platform/cordis.patch.yml` 两行都不带** —— 刻意如此，理由就是上面那把锁；熟悉 `install.mjs` 的读者本来会以为目录在那里。
 
 它**从不覆盖**，三条规则都在 `missingCatalogRows` 里：
 
 - profile 在受管块**之外**已经有自己的 `llm-pi-ai` 行 —— 那份目录是人或设置页的，整个文件保持逐字节不变；
 - 受管块已经存在 —— 重写它会把设置页就地做的编辑抹掉；
-- 把 profile 与 home 层组合起来得到的不是本部署的值 —— 运维替换过 home 那一行，此时再写 profile 行会**悄悄接管**运行时，所以让位不写。
+- 把 profile 与 home 层组合起来得到的不是本部署的值 —— 运维替换过那一行，此时再写 profile 行会**悄悄接管**运行时，所以让位不写。
 
 因此在已 provision 过的 profile 上重跑，一个字节都不写。
 
-对运行时来说这**什么都没改**：无论有没有这个块，同一份配置最后都由 home 层组合出来，`--dump-config` 打印的行完全相同，差别只在 dump 为每层输出的 `# == … patched by …` 溯源注释。写它改的是**页面显示什么**，不是模型实际跑什么。在真 `dsh web` home 上用真 Chromium 实测（干净 profile）：卡片显示「已自定义模型目录」+「恢复默认模型」，`模型 ID 1` 是 `deepseek-v4.1-flash`，`显示名称 1` 是 `DeepSeek V4.1 Flash`，上下文窗口 `262144`，最大输出 `32768` token，且**输入类型的「文本」与「图片」两个勾选框都是选中状态**。
+对运行时来说这**什么都没改**：不管有没有这个块、home 层有没有一份副本，`--dump-config` 打印的 `llm-pi-ai` 与 `agent-default-model` 两行都相同 —— 它们现在从 `profiles/<name>/cordis.patch.yml` 组合出来而不是从 `$DSH_HOME/cordis.patch.yml`，差别只在 dump 为每层输出的 `# == … patched by …` 溯源注释。写它改的是**页面显示什么、还能存什么**，不是模型实际跑什么。在真 `dsh web` home 上用真 Chromium 实测（干净 profile）：卡片显示「已自定义模型目录」+「恢复默认模型」，`模型 ID 1` 是 `deepseek-v4.1-flash`，`显示名称 1` 是 `DeepSeek V4.1 Flash`，上下文窗口 `262144`，最大输出 `32768` token，且**输入类型的「文本」与「图片」两个勾选框都是选中状态**。
+
+同一次运行也证明了那把锁没了：「设置 › 模型」只列出 `码农AI`；用「添加模型提供商 › 自定义模型 API」填 Provider ID `lead-custom-api`、一个 base URL、一个 key 和一个模型后，「创建提供商」可用，随后卡片列表变成 `["码农AI","lead-custom-api"]`，写入落在 `profiles/web/cordis.patch.yml` 的 `llm-pi-ai.providers.lead-custom-api` 下。
 
 ### 为什么要把「账号直连推理」这条 route 关掉
 
@@ -488,7 +523,7 @@ dsharness-relay:
 1. `resolveToken` 只在请求 origin 等于 `inferenceOrigin` 时才交出 grant（`packages/credentials/deepseek-account-platform/src/index.ts:385-401`），而本部署的推理 origin 是网关，网关**根本不读这个头**。实测（有效 key）：`x-dsh-auth-token` → 401，`x-api-key` → 200。
 2. 这条 route 上的 401 由 `onRequestError` 处理，它会调 `rejectToken`（`.../llm-deepseek-account/src/index.ts:26-36`）。而 `rejectToken` → `expireCredential` 会**删掉本地 grant** 并发 `deepseek-account/signed-out`（`.../deepseek-account-platform/src/index.ts:322-344`）。也就是说**一次请求失败就把用户登出** —— 这正是「登录 → 开新会话 → 回到登录页」。
 
-只关了这一条 LLM route。`deepseek-account`（登录、余额、赠金、退登）必须留着，否则整个官方账号面消失。
+停用的就这两条 LLM route：`llm-deepseek`（内置的 DeepSeek 卡片，见上）与这条账号直连 route。`deepseek-account`（登录、余额、赠金、退登）必须留着，否则整个官方账号面消失；`web-search-deepseek` 不受影响，因为它注册的是 `ctx.web` 而不是 `ctx.llm`。
 
 **这是已知的一条登出路径，不是全部解释。** 其余能让同一份凭据点失效的路径：产品自己那几个账号端点回 401 / `code: 40003`（`server/src/lib/dsh-account.ts:84-86`；退登或管理端停用会提升 `tokenVersion`，从而复现）；以及启动时的 `issuer-mismatch`，它连一次请求都不发就丢掉 grant（`.../deepseek-account-platform/src/index.ts:167-176`），Host 日志里会留 `stored grant discarded`。排查「被踢回登录」要分清是这三条里的哪一条，不能默认是这一条。
 

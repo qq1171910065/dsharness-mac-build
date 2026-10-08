@@ -585,22 +585,18 @@ test('provisionAll: writes the generated package into the profile it belongs to'
 /**
  * The model catalog the 设置 › 模型 page reads.
  *
- * Measured this round, and the reason these rows exist at all:
+ * Measured, and the reason these rows exist at all:
  * `ConfigEditor.configuration()` (`packages/boot/config-editor/src/index.ts:49-70`)
  * composes *bundle layers + the profile's patch* and keeps the FIRST row per id, so
  * `@deepseek-ai/dsh-base`'s own empty `- id: llm-pi-ai`
  * (`packages/bundle/base/cordis.patch.yml:127`) is what the card inherits. A row in a
  * later bundle layer cannot displace it, which is why writing the catalog into the
- * bundle layer did nothing. The home layer is not read there either — it is only what
- * `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63`) applies
- * for the runtime. The profile's own patch is therefore the one layer that both the
- * page *and* the runtime read, and the assertions below are ordered by exactly those
- * three facts.
+ * bundle layer did nothing. The home layer is not read there either — and since this
+ * round it must not carry the row at all, because `config-editor.edit()` refuses every
+ * write to a namespace the home layer overrides (`:136-141`). The profile's own patch is
+ * therefore the one layer that both the page *and* the runtime read, and the assertions
+ * below are ordered by exactly those three facts.
  */
-
-/** A value row's `config:` text as the catalog comparator sees it (dedented). */
-const CATALOG_BODY = (id) => MODEL_CATALOG_ROWS.find((row) => row.id === id).body.split('\n')
-  .map((line) => line.slice(4)).join('\n');
 
 test('model catalog: a fresh profile gets both rows, and only inside the managed block', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
@@ -702,23 +698,27 @@ test('model catalog: a row a person edits inside the block is not rewritten away
   }
 });
 
-test('model catalog: the managed home rows stay the runtime\'s, and the profile rows add nothing', () => {
+test('model catalog: with no home layer supplying the rows, the profile layer is the runtime\'s only source', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
   try {
     const dir = makeProfile(root, 'desktop');
-    // A home layer carrying exactly what platform/cordis.patch.yml writes.
-    writeFileSync(join(root, 'cordis.patch.yml'), [
-      '- id: llm-pi-ai',
-      '  config:',
-      ...MODEL_CATALOG_ROWS.find((row) => row.id === 'llm-pi-ai').body.split('\n'),
-      '- id: agent-default-model',
-      '  config:',
-      ...MODEL_CATALOG_ROWS.find((row) => row.id === 'agent-default-model').body.split('\n'),
-    ].join('\n'), 'utf8');
-    // Same values on both layers: the profile row duplicates the home row, which is a
-    // no-op for the runtime (last write wins per row id) and only adds what the page reads.
-    assert.deepEqual(missingCatalogRows(dir), ['llm-pi-ai', 'agent-default-model']);
-    assert.equal(CATALOG_BODY('llm-pi-ai').includes('deepseek-v4.1-flash'), true);
+    /*
+     * The shipped home layer no longer carries these rows — it must not, because
+     * `config-editor.edit()` refuses every write to a namespace it overrides
+     * (`packages/boot/config-editor/src/index.ts:136-141`). So the profile block
+     * `ensureProfileCatalog` writes is now the only value the runtime composes for the
+     * row, not merely a page-visible duplicate of one.
+     */
+    provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    const text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    assert.match(text, /^- id: llm-pi-ai$/mu, 'the profile layer must carry the route');
+    assert.match(text, /^- id: agent-default-model$/mu, 'and the default selection');
+    assert.match(text, /^ {8}baseURL: 'https:\/\/ai\.czmanong\.com\/v1'$/mu);
+    assert.match(text, /^ {12}input: \['text', 'image'\]$/mu);
+    assert.match(text, /^ {4}provider: 'dsharness-relay'$/mu);
+    assert.match(text, /^ {4}model: 'deepseek-v4\.1-flash'$/mu);
+    // Nothing else in the home is needed: this file is a complete answer on its own.
+    assert.equal(existsSync(join(root, 'cordis.patch.yml')), false, 'provisioning writes no home row of its own');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

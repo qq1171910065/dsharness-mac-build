@@ -19,6 +19,19 @@ import {
 import { PROFILE_PLUGINS } from './provision.mjs';
 
 /**
+ * The payload's own modules, imported through the **generated copies** the installer ships
+ * rather than through `platform/` — the same bytes are what reach a machine, so the model
+ * catalog and the key reference a test compares here are the ones a user gets.
+ */
+const payloadModules = {
+  ...await import('./windows/deploy/provision.mjs'),
+  ...await import('./windows/deploy/dsharness.mjs'),
+};
+
+/** The key reference the shipped bundle writes, read from the generated payload copy. */
+const MODEL_KEY_REF = payloadModules.MODEL_KEY_REF;
+
+/**
  * The installer seam's contract.
  *
  * Three things have to stay true for "the installer already carries the
@@ -97,47 +110,69 @@ test('deploy payload: the committed patch carries the production origin', () => 
   assert.doesNotMatch(text, /DSH_PLATFORM_ORIGIN/, 'the installed copy must not depend on an environment variable');
 });
 
-test('deploy payload: the installed rows select this product\u2019s model route', () => {
+test('deploy payload: the installed layer carries no page-writable row, and the two disables', () => {
   const text = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
   /*
-   * Four rows decide where a conversation actually goes, and every one of them is
-   * asserted here because a wrong value is invisible until a user's first message
-   * fails (or, worse, until their stored grant is deleted):
+   * The rows that must NOT be here are as load-bearing as the ones that must.
    *
-   * - `llm-pi-ai.providers.dsharness-relay` is the route: this product's gateway,
-   *   the OpenAI-compatible protocol it serves, and the per-user key reference.
-   * - `agent-default-model` names that route and `deepseek-v4.1-flash`.
-   * - `llm-deepseek-account` is DISABLED: it sends the account grant as
-   *   `x-dsh-auth-token`, which this gateway does not read, and a 401 through it
-   *   calls `rejectToken` and deletes the stored grant — signing the user out.
+   * `config-editor.edit()` (`packages/boot/config-editor/src/index.ts:136-141`) accepts a
+   * write only when the composed effective config equals the config about to be written,
+   * and `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63-73`)
+   * applies this layer **after** the profile's own. So a `config:` here for a namespace
+   * the settings page writes is a lock: every write to it is refused with
+   * `Configuration for "<id>" is overridden by a home patch or command-line overlay`.
+   * That was the reported bug — 添加模型提供商 could not create anything while
+   * `llm-pi-ai` was carried here. The catalog lives in each profile's own patch layer
+   * instead (`provision.mjs`'s `MODEL_CATALOG_ROWS`), which is the layer the page reads
+   * and can write back to.
    */
-  assert.match(text, /^ {6}dsharness-relay:$/mu);
-  assert.match(text, /^ {8}displayName: '码农AI'$/mu);
-  assert.match(text, /^ {8}api: 'openai-completions'$/mu);
-  assert.match(text, /^ {8}baseURL: 'https:\/\/ai\.czmanong\.com\/v1'$/mu);
-  assert.match(text, /^ {8}apiKeyEnv: 'DSHARNESS_MODEL_KEY'$/mu);
-  // Top-level rows: this file is a YAML sequence, so only the rows nested under an
-  // `insert:` are indented.
-  assert.match(text, /^- id: agent-default-model$/mu);
-  assert.match(text, /^ {4}provider: 'dsharness-relay'$/mu);
-  assert.match(text, /^ {4}model: 'deepseek-v4\.1-flash'$/mu);
-  assert.match(text, /^- id: llm-pi-ai$/mu);
-  const account = /^- id: llm-deepseek-account\n(?:.*\n)*?(?=\n- id: |\n#|$)/mu.exec(text);
-  assert.ok(account !== null, 'the account-backed LLM row must still be addressed');
-  assert.match(account[0], /^ {2}disabled: true$/mu);
+  assert.doesNotMatch(text, /^- id: llm-pi-ai$/mu, 'a config here would refuse every 设置 › 模型 write');
+  assert.doesNotMatch(text, /^- id: agent-default-model$/mu, 'same defect, through AgentDefaultModelConfig.saveSelection()');
+  // The two routes this deployment switches off, and why each must be.
+  const disabled = [...text.matchAll(/^- id: ([A-Za-z0-9-]+)\n(?:.*\n)*?(?=\n- id: |\n#|$)/gmu)]
+    .filter((match) => /^ {2}disabled: true$/mu.test(match[0]))
+    .map((match) => match[1]);
+  assert.deepEqual(disabled, ['llm-deepseek', 'llm-deepseek-account']);
+  // `llm-deepseek-account` is disabled because a 401 through it deletes the stored
+  // grant (`.../deepseek-account-platform/src/index.ts:322-344`), signing the user out.
+  assert.match(text, /^- id: llm-deepseek-account\n {2}disabled: true\n {2}config: \{\}$/mu);
+});
+
+test('deploy payload: the model route and its catalog travel in the generated bundle layer', () => {
+  /*
+   * The route moved out of this file, so the pair that must not drift is now
+   * `provision.mjs`'s catalog block against the key reference the browser half writes
+   * and reads. A mismatch is a silent `MISSING_CREDENTIAL` on every request, so the two
+   * are compared rather than each being checked against a literal — the same thing this
+   * test did while the row lived here.
+   */
+  const { MODEL_CATALOG_ROWS } = payloadModules;
+  const relay = MODEL_CATALOG_ROWS.find((row) => row.id === 'llm-pi-ai');
+  assert.ok(relay !== undefined, 'the deployment catalog must still declare the llm-pi-ai row');
+  // `body` is rendered one level under the row's `config:` key, so it starts at 4 spaces.
+  assert.match(relay.body, /^ {4}providers:$/mu);
+  assert.match(relay.body, /^ {6}dsharness-relay:$/mu);
+  assert.match(relay.body, /^ {8}displayName: '码农AI'$/mu);
+  assert.match(relay.body, /^ {8}api: 'openai-completions'$/mu);
+  assert.match(relay.body, /^ {8}baseURL: 'https:\/\/ai\.czmanong\.com\/v1'$/mu);
+  assert.match(relay.body, new RegExp(`^ {8}apiKeyEnv: '${MODEL_KEY_REF}'$`, 'mu'));
+  // Exactly one model, and it is the one this product serves, with images.
+  assert.equal((relay.body.match(/^ {10}- id: /gmu) ?? []).length, 1);
+  assert.match(relay.body, /^ {10}- id: 'deepseek-v4\.1-flash'$/mu);
+  assert.match(relay.body, /^ {12}input: \['text', 'image'\]$/mu);
+  const selection = MODEL_CATALOG_ROWS.find((row) => row.id === 'agent-default-model');
+  assert.match(selection.body, /^ {4}provider: 'dsharness-relay'$/mu);
+  assert.match(selection.body, /^ {4}model: 'deepseek-v4\.1-flash'$/mu);
 });
 
 test('deploy payload: the shipped key reference matches the plugin that writes it', async () => {
-  // Two files name the credential: the route's `apiKeyEnv` and the plugin that
-  // stores it. A mismatch is a silent `MISSING_CREDENTIAL` on every request, so the
-  // pair is compared rather than each being checked against a literal.
-  const { MODEL_KEY_REF } = await import('./dsharness.mjs');
+  // The reference is named in the catalog row and stored by the merged bundle; the pair
+  // is compared rather than each being checked against a literal.
+  const { MODEL_CATALOG_ROWS } = payloadModules;
   const { PROFILE_PLUGINS } = await import('./provision.mjs');
-  const text = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
-  assert.match(text, new RegExp(`apiKeyEnv: '${MODEL_KEY_REF}'`, 'u'));
-  // The row is inserted by the provisioned package's own patch, so it is NOT in this
-  // file; what must hold here is that the plugin writing {@link MODEL_KEY_REF} is one
-  // of the packages provisioning ships.
+  const relay = MODEL_CATALOG_ROWS.find((row) => row.id === 'llm-pi-ai');
+  assert.match(relay.body, new RegExp(`apiKeyEnv: '${MODEL_KEY_REF}'`, 'u'));
+  assert.equal(MODEL_KEY_REF, 'DSHARNESS_MODEL_KEY');
   const writer = PROFILE_PLUGINS.find((plugin) => plugin.entry === 'dsharness.mjs');
   assert.ok(writer !== undefined, 'provisioning must ship the plugin that writes the key');
   assert.equal(writer.defaultEnabled, true, 'a model route with no credential fails every request');
@@ -307,42 +342,46 @@ test('deploy entry: the Desktop profile is provisioned first, then whatever the 
 });
 
 /**
- * The managed home block has to beat the profile's own patch file.
+ * The shipped layer must leave the default-model row **writable**, and the profile layer
+ * must be what supplies it.
  *
- * This is the whole reason the model route can be pinned from a deployment: the
- * official account surface calls `session.initializeDefaultModel()` on the sign-in
- * edge (`packages/client/ui-settings-account/src/client/index.ts:117-132`), which
- * hardcodes `provider = 'deepseek-account'` and persists that choice into the
- * **profile** layer (`packages/api/session-controller/src/index.ts:298-310`). The
- * guard meant to prevent that (`hasProviderApiKey`,
- * `packages/api/session-controller/src/catalog.ts:105`) skips `deepseek-account`
- * itself, so it never fires for the provider being installed.
+ * This test is the inverse of the one it replaces. While `platform/cordis.patch.yml`
+ * carried `- id: agent-default-model`, the home layer was the last word and
+ * `AgentDefaultModelConfig.saveSelection()` (`packages/core/agent-default-model/src/index.ts:82-94`,
+ * through the same `configEditor.edit`) threw on every composer model choice. Removing the
+ * row is what makes the composer's selection persist, and the value it starts from comes
+ * from the profile layer `provision.mjs` writes.
  *
- * If the profile layer won, every sign-in would silently point the default model at
- * the account route — which in this deployment answers 401 and whose 401 handler
- * deletes the stored grant, i.e. "sign in, start a new session, get thrown back to
- * the login page". The measurement below is the one that decides it, so it is
- * asserted rather than argued.
+ * The dangerous case the old shape guarded against is now closed by the composition
+ * instead: `initializeDefaultModel()` (`packages/api/session-controller/src/index.ts:298-310`)
+ * hardcodes `provider = 'deepseek-account'`, and that route is registered only by the
+ * `llm-deepseek-account` row this deployment disables — so the catalog it searches has no
+ * such group at all and it throws `session/provider-models-unavailable` (caught by its
+ * caller) instead of writing anything.
  */
-test('deploy entry: the managed home block overrides what a sign-in writes to the profile layer', () => {
+test('deploy entry: the shipped layer leaves the default-model row writable for the composer', () => {
   const home = temporaryDirectory('deploy-layer-');
   try {
     const profileDir = join(home, 'profiles', 'desktop');
     mkdirSync(profileDir, { recursive: true });
-    // The profile layer, exactly as `initializeDefaultModel` would leave it.
+    // The profile layer, exactly as `initializeDefaultModel` used to leave it — and as
+    // the composer's own selection write leaves it: a user-owned row.
     writeFileSync(join(profileDir, 'cordis.patch.yml'),
-      '- id: agent-default-model\n  config:\n    provider: deepseek-account\n    model: deepseek-v4.1-flash\n');
+      '- id: agent-default-model\n  config:\n    provider: dsharness-relay\n    model: deepseek-v4.1-flash\n');
     const block = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
     installInto(home, block, { write: false });
     const profilePatch = readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8');
-    assert.match(profilePatch, /provider: deepseek-account/, 'the profile layer really does name the account route');
-    // `readProfilePatches` composes home AFTER profile, so ours is the last word.
-    const layers = [profilePatch, block];
-    const resolved = layers
-      .flatMap((text) => [...text.matchAll(/^- id: agent-default-model\n((?: {2}.*\n)+)/gmu)])
-      .at(-1)[1];
-    assert.match(resolved, /provider: 'dsharness-relay'/, 'the home block must be applied last and win');
-    assert.match(resolved, /model: 'deepseek-v4\.1-flash'/);
+    assert.match(profilePatch, /provider: dsharness-relay/, 'the profile layer owns the selection');
+    // The shipped layer names no such row, which is what makes that write legal.
+    assert.doesNotMatch(block, /^- id: agent-default-model$/mu);
+    assert.doesNotMatch(block, /^- id: llm-pi-ai$/mu);
+    // The selection is still this deployment's, because `provision.mjs` wrote it there.
+    const { MODEL_CATALOG_ROWS } = payloadModules;
+    const selection = MODEL_CATALOG_ROWS.find((row) => row.id === 'agent-default-model');
+    assert.match(selection.body, /^ {4}provider: 'dsharness-relay'$/mu);
+    assert.match(selection.body, /^ {4}model: 'deepseek-v4\.1-flash'$/mu);
+    // And the account route that `initializeDefaultModel` targets cannot be mounted here.
+    assert.match(block, /^- id: llm-deepseek-account\n {2}disabled: true$/mu);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

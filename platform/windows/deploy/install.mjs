@@ -21,19 +21,34 @@
  *
  * ## What belongs in the managed block, and what does not
  *
- * Only **changes to rows upstream already declares**: the account row's
- * `platformOrigin`, the model route (`llm-pi-ai`'s `dsharness-relay` provider and
- * the default selection in `agent-default-model`), and the one row this deployment
- * must switch off (`llm-deepseek-account`, whose 401 handling deletes the stored
- * account grant). No new plugin is inserted here: fork-owned plugins are
- * **provisioned as real bundle packages** by {@link provisionAll}, so the official
- * Plugins page can show and switch them. A row inserted from this file would belong
- * to no package, so the page would never list it — and an enablement flag written
- * here for one of *our* rows would be applied **after** the profile layer, so the
- * page's own switch could never override it. `platform/cordis.patch.yml` carries the
- * measurement, the reasoning, and why an upstream row is the exception.
+ * Only **rows upstream already declares**, and only ones the settings page does not
+ * write: the account row's `platformOrigin`, and the two routes this deployment must
+ * switch off — `llm-deepseek` (the built-in DeepSeek card; the official models stay
+ * reachable through `llm-pi-ai`'s catalog) and `llm-deepseek-account` (whose 401
+ * handling deletes the stored account grant). `config:` values appear here only for
+ * `deepseek-account`; the two disabled rows carry no `config` at all. No new plugin is
+ * inserted here: fork-owned plugins are **provisioned as real bundle packages** by
+ * {@link provisionAll}, so the official Plugins page can show and switch them. A row
+ * inserted from this file would belong to no package, so the page would never list it —
+ * and an enablement flag written here for one of *our* rows would be applied **after**
+ * the profile layer, so the page's own switch could never override it.
+ * `platform/cordis.patch.yml` carries the measurement, the reasoning, and why an
+ * upstream row is the exception.
  *
- * ## The one row set this file does NOT carry: the model catalog
+ * ## The row set this file must never carry: a page-writable config
+ *
+ * This layer is applied **after** the profile's own patch
+ * (`packages/boot/app-boot/src/profile-context.ts:63-73`), and
+ * `ConfigEditor.edit()` refuses any write whose namespace this layer overrides
+ * (`packages/boot/config-editor/src/index.ts:136-141`: it recomposes with the home layer
+ * and throws `Configuration for "<id>" is overridden by a home patch or command-line
+ * overlay`). So a `config:` block here for a row the settings page writes is not a
+ * default — it is a lock: every write to that namespace fails, which is what
+ * 「home 层占了 llm-pi-ai 这个 id，导致无法添加自定义模型 api 了」 was. `llm-pi-ai` and
+ * `agent-default-model` were removed for exactly that reason, and `install.test.mjs`
+ * asserts no writable row comes back.
+ *
+ * ## Where the model catalog lives instead
  *
  * The runtime reads this file, but 设置 › 模型 does not:
  * `ConfigEditor.configuration()` (`packages/boot/config-editor/src/index.ts:49-70`)
@@ -44,7 +59,7 @@
  * cannot displace it, because first-row-wins is by row id, not by layer. The catalog
  * that page must show is therefore written by `provision.mjs` into each **profile's**
  * own patch layer ({@link MODEL_CATALOG_ROWS}), guarded so a row the person already
- * has is never touched.
+ * has is never touched. That is also the layer the page can write back to.
  *
  * ## Why the managed block, and why no YAML library
  *
@@ -178,13 +193,18 @@ function main() {
    * that write is the one thing a dry run does do.
    */
   process.stdout.write(`[platform] ${dryRun ? 'would write' : 'wrote'} ${target}\n`);
-  process.stdout.write('[platform] managed rows: deepseek-account, llm-pi-ai (dsharness-relay), agent-default-model, llm-deepseek-account (disabled)\n');
+  process.stdout.write('[platform] managed rows: deepseek-account (origin), llm-deepseek (disabled: no built-in DeepSeek card), llm-deepseek-account (disabled: its 401 signs the user out)\n');
   for (const line of describeReports(reports, dryRun)) process.stdout.write(`${line}\n`);
   process.stdout.write(`[platform] account origin: ${origin}\n`);
-  process.stdout.write(`[platform] model route: dsharness-relay -> https://ai.czmanong.com/v1 (码农AI), default deepseek-v4.1-flash\n`);
   process.stdout.write(
-    '[platform] 设置 › 模型 catalog: written into each profile\'s own cordis.patch.yml'
-    + ' (the page reads that layer, not this file); an existing row is never rewritten\n',
+    '[platform] this layer carries no `llm-pi-ai` / `agent-default-model`: applied after the profile'
+    + ' layer, a config here would make 设置 › 模型 refuse every write (config-editor throws'
+    + ' "overridden by a home patch or command-line overlay")\n',
+  );
+  process.stdout.write(
+    '[platform] model route: written per profile into profiles/<name>/cordis.patch.yml'
+    + ' (dsharness-relay -> https://ai.czmanong.com/v1, 码农AI, default deepseek-v4.1-flash);'
+    + ' official models stay addable through 添加模型提供商 › 第三方模型提供商 (deepseek)\n',
   );
   // Never print the secret itself, only whether one is present.
   process.stdout.write(

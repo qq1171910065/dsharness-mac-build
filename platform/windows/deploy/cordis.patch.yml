@@ -40,45 +40,51 @@
     attemptTimeoutMs: 600000
 
 # ---------------------------------------------------------------------------
-# 模型渠道：本产品自己的网关，不是 DeepSeek 官方
+# 模型目录（`llm-pi-ai` / `agent-default-model`）**不在这份清单里**
 #
-# 上游把默认模型选成 `agent-default-model: {provider: deepseek-official,
-# model: deepseek-flash}`，而 `deepseek-official` 这个 route 由
-# `@deepseek-ai/dsh-llm-deepseek-api-key` 提供，displayName 硬编码为 `DeepSeek`、
-# 端点是 api.deepseek.com（`llm-deepseek/src/config.ts:106` 的 PUBLIC_BASE_URL），
-# 目录里也只有 `deepseek-flash` / `deepseek-v4-pro`。
+# 不是省事，而是这一层会让模型页彻底写不进去。`config-editor.edit()`
+# (`packages/boot/config-editor/src/index.ts:136-141`) 只在「合成后的生效配置」等于
+# 「即将写入的配置」时才接受写入，而 `readProfilePatches`
+# (`packages/boot/app-boot/src/profile-context.ts:63-73`) 把本层排在 profile 层**之后** ——
+# 所以本层一旦占了 `llm-pi-ai` 这个 id，它永远是最后一句，设置 › 模型 的每一次写入
+# （添加模型提供商 › 自定义模型 API、编辑码农AI 的模型目录）都被拒：
 #
-# 所以「默认就是本产品网关、默认就是 deepseek-v4.1-flash」**不能**靠改那一行实现 ——
-# 那要改上游包的 displayName 与模型目录。改用上游本来就提供、且默认挂载但空着的
-# `llm-pi-ai`（`packages/bundle/base/cordis.patch.yml:127` 注释写的就是
-# 「zero routes … until a `llm-pi-ai:` settings section supplies provider
-# profiles」）：profile 的 key 就是 route，displayName 由我们给。
+#   Configuration for "llm-pi-ai" is overridden by a home patch or command-line overlay
 #
-# `baseURL`/`api`/`models`/`defaultModelId` 与 `/api/config` 下发的是同一份口径
-# （`server/src/lib/defaults.ts`）：网关公开入口 + /v1、openai-completions、
-# 目录里只有 deepseek-v4.1-flash。`apiKeyEnv` 指向本产品为每个用户签发的
-# sk-（由 `platform/model-key.mjs` 在登录后写进凭据层）。
+# `agent-default-model` 有同一个缺陷、同一个出口：`AgentDefaultModelConfig.saveSelection()`
+# (`packages/core/agent-default-model/src/index.ts:82-94`) 走的是同一个 `configEditor.edit`。
 #
-# `agent-default-model` 是**覆盖**（上游已声明这一行），配置也是整块替换。
-- id: llm-pi-ai
-  config:
-    providers:
-      dsharness-relay:
-        displayName: '码农AI'
-        api: 'openai-completions'
-        baseURL: 'https://ai.czmanong.com/v1'
-        apiKeyEnv: 'DSHARNESS_MODEL_KEY'
-        models:
-          - id: 'deepseek-v4.1-flash'
-            name: 'DeepSeek V4.1 Flash'
-            contextWindow: 262144
-            maxTokens: 32768
-            input: ['text', 'image']
+# 目录因此改由 `platform/provision.mjs` 写进**每个 profile 自己的** patch 层
+# (`ensureProfileCatalog`)：对运行时等价（本层不再提供同样的值，改由 profile 层提供，
+# 实测 `--dump-config` 逐行一致，只差每层的来源注释），而对模型页是它认的 override。
+# ---------------------------------------------------------------------------
 
-- id: agent-default-model
-  config:
-    provider: 'dsharness-relay'
-    model: 'deepseek-v4.1-flash'
+# ---------------------------------------------------------------------------
+# 关掉官方 DeepSeek 直连这条 route —— 也就是内置的那张 DeepSeek 卡片
+#
+# 用户口径：「原本自带的deepseek这个模型配置可以去掉，添加模型供应商时可以选择添加
+# 官方的模型。但是默认的可以去掉，默认的只有码农ai这一个模型服务」。
+#
+# 这张卡片就是 `deepseek-official` 这条 route，由本行注册
+# (`packages/llm/llm-deepseek-api-key/src/index.ts:15,36-38`)，`settingsPath: []`。
+# 空的 settingsPath 在模型页的定义里「永远已配置」
+# (`ui-settings-models/src/client/store.ts:205-206`)，于是它永远出现在卡片列表
+# (`ModelsSection.tsx:341,398`)，而且既不可 add (`:343-346`) 也不可 remove (`:208-210`)。
+# 也就是说：**没有任何「不改上游」的口子能在保留这条 route 的同时把它藏起来** ——
+# 唯一的杠杆就是在部署层关掉它，和本文件已经关掉的 `llm-deepseek-account` 一样。
+#
+# 关掉**不等于**官方模型不可用：官方模型改从 `llm-pi-ai` 的目录里添加。
+# `llm-pi-ai` 把已装 pi-ai 目录里的**每一个** provider 都声明成可配置项
+# (`llm-pi-ai/src/index.ts:124-146`，目录来自 `catalog.ts:192-205`)，其中就有 `deepseek`
+# （`baseUrl: https://api.deepseek.com`，模型 `deepseek-flash`＝DeepSeek V4.1 Flash 与
+# `deepseek-v4-pro`）—— 未配置的目录项正是「添加模型提供商 › 第三方模型提供商」列出的东西。
+#
+# 只关这一条 route：`web-search-deepseek` 用的是自己的 `ctx.web` 身份
+# (`web-search-deepseek/src/provider.ts:27`)，从不碰 `ctx.llm`；`deepseek-account`
+# （登录 / 余额 / 退登）必须留着。
+# ---------------------------------------------------------------------------
+- id: llm-deepseek
+  disabled: true
 
 # ---------------------------------------------------------------------------
 # 关掉「账号直连推理」这条 route

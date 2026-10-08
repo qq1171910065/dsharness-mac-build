@@ -130,14 +130,22 @@ test('the shipped cordis.patch.yml inserts no fork-owned plugin row', () => {
  * layer, and the switch would appear to do nothing. Which of our plugins starts
  * switched on is expressed once, in `PROFILE_PLUGINS[...].defaultEnabled`.
  *
- * The one `disabled:` this file IS allowed — and required — to state is for an
- * **upstream-declared** row that must not run in this deployment at all, because no
- * Plugins-page switch governs it and leaving it enabled breaks the product. Today
- * that is `llm-deepseek-account`: it sends the account grant as `x-dsh-auth-token`
- * to the model endpoint, this product's gateway does not read that header, and the
- * resulting 401 drives `rejectToken` → `expireCredential`, which deletes the stored
- * grant (`packages/credentials/deepseek-account-platform/src/index.ts:322-344`) and
- * signs the user out. So the assertion is two-sided rather than a blanket ban.
+ * The `disabled:` rows this file IS allowed — and required — to state are
+ * **upstream-declared** routes that must not run in this deployment, because no
+ * Plugins-page switch governs either of them:
+ *
+ * - `llm-deepseek`: the built-in `DeepSeek` model card (`settingsPath: []`, so it is
+ *   always `configured`, never `addable`, never `removable` — `ui-settings-models/
+ *   src/client/store.ts:205-210`). The user asked for the default list to hold only
+ *   码农AI; the official models stay addable through `llm-pi-ai`'s catalog, which
+ *   ships `deepseek` (`llm-pi-ai/src/index.ts:124-146`).
+ * - `llm-deepseek-account`: it sends the account grant as `x-dsh-auth-token` to the
+ *   model endpoint, this product's gateway does not read that header, and the
+ *   resulting 401 drives `rejectToken` → `expireCredential`, which deletes the stored
+ *   grant (`packages/credentials/deepseek-account-platform/src/index.ts:322-344`) and
+ *   signs the user out.
+ *
+ * So the assertion is two-sided rather than a blanket ban.
  */
 test('the shipped cordis.patch.yml states no default enablement for a shipped bundle', () => {
   const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
@@ -146,14 +154,51 @@ test('the shipped cordis.patch.yml states no default enablement for a shipped bu
     const block = new RegExp(`^- id: ${plugin.name}\\n(?:.*\\n)*?(?=\\n- |\\n#|$)`, 'mu').exec(text);
     assert.equal(block, null, `${plugin.name} must not be addressed by this layer at all`);
   }
-  // The only row allowed to be switched off is the account-backed LLM route, and it
-  // must be, for the reason in the comment above.
   const disabled = [...text.matchAll(/^- id: ([A-Za-z0-9-]+)\n(?:.*\n)*?(?=\n- id: |\n#|$)/gmu)]
     .filter((match) => /^\s+disabled: true$/mu.test(match[0]))
     .map((match) => match[1]);
-  assert.deepEqual(disabled, ['llm-deepseek-account'],
-    'the account-backed LLM route is the one upstream row this deployment must switch off; '
-    + 'any other disabled row would silently remove a capability or make a Plugins switch inert');
+  assert.deepEqual(disabled, ['llm-deepseek', 'llm-deepseek-account'],
+    'exactly the two upstream routes this deployment must switch off: '
+    + 'the built-in DeepSeek card, and the account-backed LLM route whose 401 signs the user out');
+});
+
+/**
+ * The rows this layer must never regain: a `config:` block for a namespace the
+ * settings page writes.
+ *
+ * `config-editor.edit()` (`packages/boot/config-editor/src/index.ts:136-141`) accepts a
+ * write only when the composed effective config equals what it is about to write, and
+ * `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63-73`) appends
+ * **this** layer after the profile's own. So a `config:` here is the last word, and
+ * every write from 设置 › 模型 to that namespace is refused with
+ * `Configuration for "<id>" is overridden by a home patch or command-line overlay`.
+ *
+ * That is the reported bug: `llm-pi-ai` was carried here, so 添加模型提供商 ›
+ * 自定义模型 API could never create anything. `agent-default-model` had the same defect
+ * through `AgentDefaultModelConfig.saveSelection()`. The catalog itself is not lost by
+ * moving it: `provision.mjs` writes both rows into each profile's own patch layer
+ * (`MODEL_CATALOG_ROWS`), which is the layer the page reads *and* can write back to.
+ */
+test('the shipped cordis.patch.yml carries no config for a page-writable row', () => {
+  const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
+  for (const id of ['llm-pi-ai', 'agent-default-model']) {
+    assert.ok(!new RegExp(`^- id: ${id}$`, 'mu').test(text),
+      `${id} must not be addressed by this layer: a config here makes every 设置 › 模型 write throw`);
+  }
+  /*
+   * Every row with a `config:` block must be one whose own writer is not the models
+   * page: `deepseek-account` (the login surface's own row) and `llm-deepseek-account`
+   * (disabled with an explicitly emptied config). A `config:` for a models-page
+   * namespace is the lock this test exists to catch.
+   */
+  const configured = [...text.matchAll(/^- id: ([A-Za-z0-9-]+)\n((?:.*\n)*?)(?=\n- id: |\n#|$)/gmu)]
+    .filter((match) => /^ {2}config:/mu.test(match[2]))
+    .map((match) => match[1]);
+  assert.deepEqual(configured, ['deepseek-account', 'llm-deepseek-account'],
+    'only the account rows carry a config; anything else is a page-writable namespace being locked');
+  for (const id of configured) {
+    assert.ok(!['llm-pi-ai', 'agent-default-model'].includes(id), `${id} must stay writable from 设置 › 模型`);
+  }
 });
 
 test('installInto: writes the rows and provisions the profile plugins', () => {

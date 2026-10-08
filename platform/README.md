@@ -27,15 +27,17 @@ This layer therefore edits no upstream file and uses three public mechanisms:
 
 1. the profile patch layer (`cordis.patch.yml`) overrides or disables rows by `id`;
 2. cordis plugin packages (`dsh.bundle.patch` for the Host half, `dsh.client` for the browser half) add capability;
-3. the machine-level host configuration (`$DSH_HOME/cordis.patch.yml`) applies overrides to every profile, including the application-owned `desktop` one — **config overrides only**; the fork-owned plugin is provisioned as a bundle package instead, so the official Plugins page lists it as a real card.
+3. the machine-level host configuration (`$DSH_HOME/cordis.patch.yml`) applies overrides to every profile, including the application-owned `desktop` one — **only for rows the settings page does not write**; a `config:` there for a writable namespace is a lock, not a default (see “The model route…” below). The fork-owned plugin is provisioned as a bundle package instead, so the official Plugins page lists it as a real card.
 
 ## Layout
 
 ```text
 platform/
-  cordis.patch.yml         deployment rows: login origin, model route, and the disabled row
-  install.mjs              write those rows, then provision the profile plugin
-  provision.mjs            install this product's one bundle package and retire the four it replaced
+  cordis.patch.yml         deployment rows: the login origin, and the two upstream routes this
+                           deployment switches off — no page-writable `config:` (see below)
+  install.mjs              write those rows, then provision the profile plugin and its catalog
+  provision.mjs            install this product's one bundle package, retire the four it replaced,
+                           and write the model catalog into each profile's own patch layer
   dsharness.mjs            the product's own bundle, host half: the local gateway, the model-key
                            delivery loop, the update check, and the /dsharness/status.json status
                            face plus the on-demand /dsharness/secret.json value face
@@ -45,11 +47,11 @@ platform/
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
-  install.test.mjs         the deployment rows and their layer precedence (14 cases)
+  install.test.mjs         the deployment rows, their layer precedence, and the rows this layer must never regain (15 cases)
   provision.test.mjs       the plugin provisioning policy, the retired-package migration, and the model catalog (34 cases)
   dsharness.test.mjs       the merged bundle's host components and the status + value faces (76 cases)
   dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel, the copy buttons (22 cases)
-  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (23 cases)
+  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (24 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
@@ -95,7 +97,7 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugin this product ships into every profile it finds (see the plugins section below). `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated package, our dependency entry, our selection, and the model catalog block it wrote into each profile's own patch file (see the catalog section below).
+The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugin this product ships into every profile it finds (see the plugins section below). Its managed rows are `deepseek-account` plus the two upstream routes it switches off, `llm-deepseek` and `llm-deepseek-account`; it deliberately carries no `config:` for a namespace the settings page writes. `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated package, our dependency entry, our selection, and the model catalog block it wrote into each profile's own patch file (see the catalog section below).
 
 `DSHARNESS_SKIP_INSTALL=1` makes `dev-all.ps1` pass `--no-marketplace`, because that switch already means "do not use the network here".
 
@@ -313,9 +315,11 @@ layer overwrites an earlier one per row id. Measured with the real
 A default written into our managed block is therefore the last word and the page's
 switch could never turn the plugin on. Letting the package own its row removes the
 question: `platform/cordis.patch.yml` now carries a comment-only explanation where
-that `insert` used to be, and `install.test.mjs` asserts no fork-owned insert and no
-`disabled:` remain there. What keeps that package's row from being switched off is a
-separate row inside the package's own patch, explained next.
+that `insert` used to be, and `install.test.mjs` asserts that no fork-owned row is
+addressed by that layer at all. The only `disabled:` rows it does assert are the two
+**upstream** routes this deployment must switch off — no Plugins-page switch governs
+either of them. What keeps our own package's row from being switched off is a separate
+row inside the package's own patch, explained next.
 
 #### The shipped bundle cannot be switched off or uninstalled
 
@@ -511,18 +515,22 @@ Four things that cost time and are worth knowing before writing against this sur
 
 ## What it changes
 
-`cordis.patch.yml` addresses four rows that upstream already declares. A patch replaces a
-row's whole `config`, so an override restates every key that row owns. No fork-owned plugin
-is inserted here — it ships as a bundle package instead, for the reason given above.
+`cordis.patch.yml` addresses upstream-declared rows only, and only ones the settings page
+does not write. A patch replaces a row's whole `config`, so an override restates every key
+that row owns. No fork-owned plugin is inserted here — it ships as a bundle package instead,
+for the reason given above.
 
 | row | upstream default | this deployment |
 |-----|------------------|-----------------|
 | `deepseek-account` → `platformOrigin` | `https://platform.deepseek.com` | this product's server (`PUBLIC_BASE_URL`) |
 | `deepseek-account` → `desktopPlatform` | `null` | the original expression is kept |
 | `deepseek-account` → `allowLoopbackHttp` | `false` | enabled unless `DSH_PLATFORM_ALLOW_LOOPBACK_HTTP=0` |
-| `llm-pi-ai` → `providers.dsharness-relay` | `{}` (no routes) | this product's gateway, shown as 「码农AI」 |
-| `agent-default-model` | `deepseek-official` / `deepseek-flash` | `dsharness-relay` / `deepseek-v4.1-flash` |
-| `llm-deepseek-account` → `disabled` | mounted | `true` — see below |
+| `llm-deepseek` → `disabled` | mounted | `true` — the built-in DeepSeek card, see below |
+| `llm-deepseek-account` → `disabled` | mounted | `true` — its 401 signs the user out, see below |
+
+`llm-pi-ai` and `agent-default-model` are **not** in this table any more, and that is the point
+of the next section: both are namespaces 设置 › 模型 writes, and a `config:` for a writable
+namespace in this layer does not provide a default — it refuses every write.
 
 The installed copy of this file carries a literal origin rather than the `!!js process.env…`
 expression the development copy uses: an installed machine has no environment variable to
@@ -549,13 +557,73 @@ dsharness-relay:
 `baseURL`, `api` and the model catalog match what `GET /api/config` already delivers
 (`server/src/lib/defaults.ts`), so the model picker and the server agree.
 
+#### A `config:` in the home layer for a writable namespace is a lock
+
+`llm-pi-ai` and `agent-default-model` used to be written by **both** patch layers — the profile's
+own and this file's. That was a bug, and the user reported it as one:
+
+> home 层占了 llm-pi-ai 这个 id，导致无法添加自定义模型 api 了，给我优化一下
+
+`readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63-73`) applies the home
+layer **after** the profile layer, and `ConfigEditor.edit()`
+(`packages/boot/config-editor/src/index.ts:136-141`) accepts a write only when the recomposed
+effective config equals the value it is about to write. So a home-layer `config:` for a
+namespace the settings page writes can never be edited from the page; every attempt throws
+
+```text
+Configuration for "llm-pi-ai" is overridden by a home patch or command-line overlay
+```
+
+Measured both ways with the real `composeEntries`: with the home row present the namespace
+composes to `providers: ["dsharness-relay"]` and the write is refused; with the home row removed
+it composes to `["dsharness-relay","my-custom-api"]` and the write is accepted.
+`agent-default-model` carries the same defect through
+`AgentDefaultModelConfig.saveSelection()` (`packages/core/agent-default-model/src/index.ts:82-94`),
+which is how the composer's model choice is saved — so it left this layer too.
+
+The rule that falls out of it, and what `install.test.mjs` now asserts: **this layer may state
+`config:` only for rows the settings page does not own.** Today that is `deepseek-account`
+(the login surface's own row) and `llm-deepseek-account` (disabled, with an explicitly emptied
+`config`); `llm-pi-ai` and `agent-default-model` must stay writable from 设置 › 模型.
+
+A machine upgrading from the shipped `.20261008.2` self-heals on the next provision: copying
+that build's home file into a temp home and running the new `install.mjs` turns the managed rows
+from `[deepseek-account, llm-pi-ai, agent-default-model, llm-deepseek-account]` into
+`[deepseek-account, llm-deepseek, llm-deepseek-account]`.
+
+#### The built-in DeepSeek card is off, and the official models are added instead
+
+> 原本自带的deepseek这个模型配置可以去掉，添加模型供应商时可以选择添加官方的模型。但是默认的可以去掉，默认的只有码农ai这一个模型服务
+
+That card is the `deepseek-official` route, registered by the `llm-deepseek` row
+(`packages/llm/llm-deepseek-api-key/src/index.ts:15,36-38`) with `settingsPath: []`. An empty
+`settingsPath` counts as always-configured (`ui-settings-models/src/client/store.ts:205-206`),
+so the card always renders (`ModelsSection.tsx:341,398`) and is never addable (`:343-346`) nor
+removable (`:208-210`). There is therefore **no zero-upstream-change mechanism that hides it
+while keeping the route mounted**; the only lever is disabling the row in a deployment layer,
+which is what this file does — the same move as the `llm-deepseek-account` disable beside it.
+
+Disabling it does **not** make the official models unreachable. They move to the add-provider
+path: `llm-pi-ai` declares every provider in the installed pi-ai catalog as a configurable
+provider (`llm-pi-ai/src/index.ts:241-250` plus its `directoryEntries`), and that catalog ships
+`deepseek` at `https://api.deepseek.com` with `deepseek-flash` (DeepSeek V4.1 Flash) and
+`deepseek-v4-pro`. Unconfigured catalog providers are exactly what 添加模型提供商 ›
+第三方模型提供商 lists. Measured: the catalog select holds 41 options including `deepseek`;
+adding it reported `已保存 deepseek。` and produced a live route in the composer's model picker.
+
+Only the llm route is affected: `web-search-deepseek` registers into `ctx.web` under its own id
+(`web-search-deepseek/src/provider.ts:27`) and never touches `ctx.llm`, so web search keeps its
+DeepSeek provider. The escape hatch, for anyone who wants the built-in card back, is to delete
+the `llm-deepseek` row from this file — it carries no `config`, so removing it restores upstream
+behaviour without touching anything else.
+
 ### The Settings › Models page reads its catalog from the profile's own patch layer
 
 The user asked for the model catalog to be there by default, with the input types it supports:
 
 > 码农ai模型配置中的模型目录要默认给我配置好deepseek-v4.1-flash，且输入类型要支持文本和图片
 
-The runtime was already correct — the rows above are composed by `readProfilePatches`
+The runtime is served by these rows through `readProfilePatches`
 (`packages/boot/app-boot/src/profile-context.ts:63`) as *bundle layers → the profile's patch →
 `$DSH_HOME/cordis.patch.yml` → overlays*, last write wins — yet the page said
 「正在使用适配器默认模型」 (the adapter's default model) and showed no models. The reason is that
@@ -566,15 +634,19 @@ the page reads a **different set of layers** than the runtime:
 | the runtime (`readProfilePatches`) | bundle layers → profile patch → home patch → overlays | **last** |
 | Settings › Models (`ConfigEditor.configuration()`, `packages/boot/config-editor/src/index.ts:49-70`) | bundle layers + the profile's patch only | **first** |
 
-First-row-wins is why the home layer cannot fix the page: every profile's bundle list starts
-with `@deepseek-ai/dsh-base`, and that bundle already declares `- id: llm-pi-ai`
+First-row-wins is why a bundle-layer override can never fix the page: every profile's bundle list
+starts with `@deepseek-ai/dsh-base`, and that bundle already declares `- id: llm-pi-ai`
 (`packages/bundle/base/cordis.patch.yml:127`) with no `providers`, so that empty row is the one
 the card inherits. A row in the **profile's own** patch does win for the page (it becomes the
 card's override, which renders as 「已自定义模型目录」 + 「恢复默认模型」), so that is where the
 catalog goes.
 
-`provision.mjs` therefore writes a managed block into **each profile's own `cordis.patch.yml`**,
-carrying the same two rows the home layer carries:
+The home layer is not an option for it either, and that is a second, independent reason: it is
+applied **after** the profile layer, so a `config:` there for a writable namespace refuses every
+write from the page (the lock described above). Both constraints point at the same layer, so the
+catalog has exactly one home:
+
+`provision.mjs` writes a managed block into **each profile's own `cordis.patch.yml`**:
 
 ```yaml
 # >>> dsharness model catalog
@@ -604,9 +676,9 @@ carrying the same two rows the home layer carries:
 
 `MODEL_CATALOG_ROWS` is that pair; `ensureProfileCatalog` writes it, `missingCatalogRows`
 decides whether to, `removeProfileCatalog` takes it back (which `install.mjs --remove` calls),
-and `provisionProfile` reports what it wrote as `catalog`. **`platform/cordis.patch.yml` was
-deliberately not changed** — the home layer is still the runtime's own copy of these rows, and a
-reader who knows `install.mjs` manages that file would otherwise expect them there.
+and `provisionProfile` reports what it wrote as `catalog`. **`platform/cordis.patch.yml` carries
+neither row** — deliberately, for the lock reason above; a reader who knows `install.mjs` manages
+that file would otherwise expect the catalog there.
 
 It never clobbers, and all three rules are in `missingCatalogRows`:
 
@@ -614,19 +686,25 @@ It never clobbers, and all three rules are in `missingCatalogRows`:
   the person's or the settings page's, and the whole file is left byte-identical;
 - the managed block is already present — rewriting it would undo an edit the page made in place;
 - composing the profile with the home layer yields something that is **not** this deployment's —
-  an operator replaced the home row, and a profile row would then silently take over the
+  an operator replaced the row, and a profile row would then silently take over the
   runtime, so it defers instead.
 
 A rerun on a provisioned profile therefore writes no byte at all.
 
-For the runtime this changes **nothing**: the same config is composed last from the home layer
-either way, so `--dump-config` prints the same rows with the block present or absent, differing
-only in the per-layer provenance comments the dump emits. Writing it changes what the page
-shows, not what the model runs on. Measured on a real `dsh web` home with a real Chromium, on a
-fresh profile: the card shows 「已自定义模型目录」 + 「恢复默认模型」, `模型 ID 1` is
-`deepseek-v4.1-flash`, `显示名称 1` is `DeepSeek V4.1 Flash`, the context window is `262144`, the
-maximum output is `32768` tokens, and the 输入类型 checkboxes are **文本 checked and 图片
-checked**.
+For the runtime this changes **nothing**: `--dump-config` prints the same `llm-pi-ai` and
+`agent-default-model` rows whether the block is present or absent, and whether the home layer
+carries a copy or not — they are now composed from `profiles/<name>/cordis.patch.yml` instead of
+from `$DSH_HOME/cordis.patch.yml`, which changes only the per-layer provenance comments the dump
+emits. Writing it changes what the page shows and what it can save, not what the model runs on.
+Measured on a real `dsh web` home with a real Chromium, on a fresh profile: the card shows
+「已自定义模型目录」 + 「恢复默认模型」, `模型 ID 1` is `deepseek-v4.1-flash`, `显示名称 1` is
+`DeepSeek V4.1 Flash`, the context window is `262144`, the maximum output is `32768` tokens, and
+the 输入类型 checkboxes are **文本 checked and 图片 checked**.
+
+The same run is what proves the lock is gone: 设置 › 模型 lists only `码农AI`, and
+添加模型提供商 › 自定义模型 API with Provider ID `lead-custom-api`, a base URL, a key and one model
+leaves 创建提供商 enabled, after which the card list reads `["码农AI","lead-custom-api"]` and the
+write lands in `profiles/web/cordis.patch.yml` under `llm-pi-ai.providers.lead-custom-api`.
 
 ### Why the account-backed model route is switched off
 
@@ -644,8 +722,10 @@ Two facts make that route unusable here, and the second is destructive:
    (`.../deepseek-account-platform/src/index.ts:322-344`). So a single failed request signs the
    user out — which is what "sign in, start a new session, land back on the login page" was.
 
-Only that LLM row is disabled. `deepseek-account` itself (login, balance, bonuses, sign-out)
-must stay mounted or the whole official account surface disappears.
+Only these two LLM rows are disabled — `llm-deepseek` (the built-in DeepSeek card, above) and
+this account-backed route. `deepseek-account` itself (login, balance, bonuses, sign-out)
+must stay mounted or the whole official account surface disappears, and `web-search-deepseek`
+is untouched because it registers into `ctx.web`, not `ctx.llm`.
 
 **This is one known sign-out path, not a complete explanation.** The other paths that can
 clear the same credential are: a 401/`code: 40003` from the product's own account endpoints
