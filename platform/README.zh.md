@@ -37,16 +37,18 @@ platform/
   install.mjs              write those rows, then provision the profile plugin
   provision.mjs            install this product's one bundle package and retire the four it replaced
   dsharness.mjs            the product's own bundle, host half: the local gateway, the model-key
-                           delivery loop, the update check, and the /dsharness/status.json status face
+                           delivery loop, the update check, and the /dsharness/status.json status
+                           face plus the on-demand /dsharness/secret.json value face
   dsharness-ui.js          its browser half: the read-only component panel on the bundle's own card,
-                           the Settings › General update row, and the status face's consumer
+                           its two copy buttons, the Settings › General update row, and the status
+                           face's consumer
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
   install.test.mjs         the deployment rows and their layer precedence (14 cases)
-  provision.test.mjs       the plugin provisioning policy and the retired-package migration (26 cases)
-  dsharness.test.mjs       the merged bundle's host components and the status face (73 cases)
-  dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel (16 cases)
+  provision.test.mjs       the plugin provisioning policy, the retired-package migration, and the model catalog (34 cases)
+  dsharness.test.mjs       the merged bundle's host components and the status + value faces (76 cases)
+  dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel, the copy buttons (22 cases)
   deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (23 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
@@ -86,7 +88,7 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关也记在同一个文件里；随后它把本产品自带的插件 provision 进每个它能找到的 profile（见下面「自有插件是真正的组合包」）。`--no-marketplace` 不动社区插件市场；`--check` 只报告不写；`--remove` 收回受管行、我们生成的包、依赖项与选中项。
+脚本是**合并**而不是覆盖 —— 因为官方插件管理器把用户开关也记在同一个文件里；随后它把本产品自带的插件 provision 进每个它能找到的 profile（见下面「自有插件是真正的组合包」）。`--no-marketplace` 不动社区插件市场；`--check` 只报告不写；`--remove` 收回受管行、我们生成的包、依赖项、选中项，以及它写进每个 profile 自己 patch 文件里的模型目录块（见下面模型目录那一节）。
 
 `DSHARNESS_SKIP_INSTALL=1` 会让 `dev-all.ps1` 传 `--no-marketplace` —— 那个开关本来就意味着「这里别联网」。
 
@@ -230,6 +232,8 @@ rows: [dsharness]        overrides: []
 
 `--dump-config` 组合出来的行与那个包自己的 patch 声明完全一致。通道本身对正确密钥回 200，错密钥/无密钥仍是 401 —— `check-host-auth.mjs` 对真机 Host 覆盖了这一段。
 
+provision 写的是**三样**东西，不是一样：那个包与两个 manifest 标志，外加一个受管的**模型目录块**，写进 profile 自己的 `cordis.patch.yml` —— 也就是「设置 › 模型」页读的那一层（见下面那一节）。`provisionProfile(...).catalog` 报告它写了哪些 id，`--remove` 会把这块连同其它一切一起收回。
+
 #### 一行、三个子插件、分段配置
 
 `apply()` 把三个宿主组件用 `ctx.plugin(gatewayComponent, config.gateway)` 及其两个兄弟挂成 Cordis **子插件**，所以 Loader 里只有一行（`id: dsharness`）、插件页上只有一张卡；第四个组件（状态面板）由浏览器半边画在同一张卡片里，不额外占一行。生成的 patch 里每个组件一段配置：
@@ -318,6 +322,7 @@ pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是
 |----|--------|
 | `GET /dsharness/gateway` | HTML 页：端口、本机地址、共享密钥、cookie 名、登录页，以及一个复制按钮 |
 | `GET /dsharness/gateway.json` | 同一份事实的 JSON，给调用方与验收脚本用 |
+| `GET /dsharness/secret.json` | 那两个值本身，按需取 —— 面板上两个复制按钮读的就是它（见组件状态面板那一节） |
 
 三点是刻意的：
 
@@ -327,7 +332,7 @@ pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是
 
 密钥未配置（或太短）时现在改成**生成并持久化**，而不是让插件整体不挂载：部署行总是给出 `token` 键，所以「未配置」才是默认态，而一条会自己关掉的通道没有任何东西可显示。生成的值写进凭据层的 `DSHARNESS_AUTH_TOKEN`，因此跨重启稳定 —— 每次启动都变的密钥，是用户永远抄不下来的密钥。要关掉这条通道只有 `enabled: false`。
 
-几个面都注册成 `kind: 'exact'`，并且在 `authorizeIndex` 上额外放行：`webServer.match()` 先查 exact 表，但 `frontend-static` 会把 index 请求交给 `authorizeIndex`，而它只认 `GET /` —— 不放行的话这几页能不能读到就取决于路由注册谁先赢。
+几个面都注册成 `kind: 'exact'`，并且在 `authorizeIndex` 上额外放行：`webServer.match()` 先查 exact 表，但 `frontend-static` 会把 index 请求交给 `authorizeIndex`，而它只认 `GET /` —— 不放行的话这几页能不能读到就取决于路由注册谁先赢。`/dsharness/secret.json` 以同样方式注册、也在同一个 `PUBLIC_PATHS` 名单里；那份放行名单只决定「请求能不能到达 handler」，拒绝外机调用方的仍然是每个 handler 里的回环门。
 
 
 网关组件包装的是 `connection.requestRejection` 与 `connection.authorizeIndex`，而不是注册路由 —— 因为 `/api` 已经被占了：`webServer.register` 对同一个 `(kind, path)` 重复注册会抛错，而升级握手那条路由由 `api-gateway` 单独注册。两处准入判断最终都汇到这两个服务方法上，所以**一处包装覆盖全部载体**。
@@ -421,6 +426,61 @@ dsharness-relay:
 
 `baseURL`、`api` 与模型目录都与 `GET /api/config` 下发的一致（`server/src/lib/defaults.ts`），所以模型选择器与服务端说的是同一件事。
 
+### 「设置 › 模型」页的目录读的是 profile 自己的 patch 层
+
+用户口径：模型目录要默认配好，且输入类型要支持文本和图片：
+
+> 码农ai模型配置中的模型目录要默认给我配置好deepseek-v4.1-flash，且输入类型要支持文本和图片
+
+运行时本来就是对的 —— 上面那些行由 `readProfilePatches`（`packages/boot/app-boot/src/profile-context.ts:63`）按 *bundle 层 → profile patch → `$DSH_HOME/cordis.patch.yml` → overlay* 组合、**后者覆盖前者** —— 但页面上写的是「正在使用适配器默认模型」，一个模型都没有。原因是**页面读的层与运行时不是同一组**：
+
+| 读方 | 它组合哪些层 | 同 id 谁赢 |
+|------|--------------|------------|
+| 运行时（`readProfilePatches`） | bundle 层 → profile patch → home patch → overlay | **后者** |
+| 设置 › 模型（`ConfigEditor.configuration()`，`packages/boot/config-editor/src/index.ts:49-70`） | 只有 bundle 层 + profile patch | **前者** |
+
+「同 id 取第一行」正是 home 层修不了这个页面的原因：每个 profile 的 bundle 列表都以 `@deepseek-ai/dsh-base` 开头，而那个 bundle 自己就声明了 `- id: llm-pi-ai`（`packages/bundle/base/cordis.patch.yml:127`）且没有 `providers`，于是卡片继承的就是这条空行。而写在 **profile 自己那份** patch 里的行**确实**能赢（它会成为卡片的 override，渲染成「已自定义模型目录」+「恢复默认模型」），所以目录写在那儿。
+
+`provision.mjs` 因此把一个受管块写进**每个 profile 自己的 `cordis.patch.yml`**，里面就是 home 层那两行：
+
+```yaml
+# >>> dsharness model catalog
+# Written by platform/provision.mjs: the deployment model catalog the 设置 › 模型 page
+# reads as this profile's own override. Rows are edited from that page; everything
+# outside this block is left exactly as it was.
+- id: llm-pi-ai
+  config:
+    providers:
+      dsharness-relay:
+        displayName: '码农AI'
+        api: 'openai-completions'
+        baseURL: 'https://ai.czmanong.com/v1'
+        apiKeyEnv: 'DSHARNESS_MODEL_KEY'
+        models:
+          - id: 'deepseek-v4.1-flash'
+            name: 'DeepSeek V4.1 Flash'
+            contextWindow: 262144
+            maxTokens: 32768
+            input: ['text', 'image']
+- id: agent-default-model
+  config:
+    provider: 'dsharness-relay'
+    model: 'deepseek-v4.1-flash'
+# <<< dsharness model catalog
+```
+
+`MODEL_CATALOG_ROWS` 就是这一对；`ensureProfileCatalog` 负责写，`missingCatalogRows` 决定要不要写，`removeProfileCatalog` 收回（`install.mjs --remove` 会调它），`provisionProfile` 把写进去的内容报成 `catalog`。**`platform/cordis.patch.yml` 刻意没改** —— home 层仍然是这两行在运行时那一侧的副本，而熟悉 `install.mjs` 的读者本来会以为它们在那里。
+
+它**从不覆盖**，三条规则都在 `missingCatalogRows` 里：
+
+- profile 在受管块**之外**已经有自己的 `llm-pi-ai` 行 —— 那份目录是人或设置页的，整个文件保持逐字节不变；
+- 受管块已经存在 —— 重写它会把设置页就地做的编辑抹掉；
+- 把 profile 与 home 层组合起来得到的不是本部署的值 —— 运维替换过 home 那一行，此时再写 profile 行会**悄悄接管**运行时，所以让位不写。
+
+因此在已 provision 过的 profile 上重跑，一个字节都不写。
+
+对运行时来说这**什么都没改**：无论有没有这个块，同一份配置最后都由 home 层组合出来，`--dump-config` 打印的行完全相同，差别只在 dump 为每层输出的 `# == … patched by …` 溯源注释。写它改的是**页面显示什么**，不是模型实际跑什么。在真 `dsh web` home 上用真 Chromium 实测（干净 profile）：卡片显示「已自定义模型目录」+「恢复默认模型」，`模型 ID 1` 是 `deepseek-v4.1-flash`，`显示名称 1` 是 `DeepSeek V4.1 Flash`，上下文窗口 `262144`，最大输出 `32768` token，且**输入类型的「文本」与「图片」两个勾选框都是选中状态**。
+
 ### 为什么要把「账号直连推理」这条 route 关掉
 
 `llm-deepseek-account` 用 `account.resolveToken(baseURL)` 拿凭证，再把拿到的东西当 `x-dsh-auth-token` 发出去（`packages/llm/llm-deepseek-account/src/index.ts:20-25`）。两条事实让它在本产品下走不通，第二条还是**破坏性的**：
@@ -473,12 +533,12 @@ dsharness-relay:
 
 第一条是「一个包四个组件、而不是四个包」的由来；第二条是「面板只读」的由来。合并同时消掉了重复：设置里那一行「检查更新」与面板里的更新行现在是同一个更新组件，不再是两个插件。
 
-面板占的是插件页上**这个包自己的卡片**里的 `plugins.bundle.config` 槽位（按 `key` 注册，必须等于包名 `dsharness`），所以不用多一张卡、也不用多一行 Loader 行就能看到组件状态。它画四行：
+面板占的是插件页上**这个包自己的卡片**里的 `plugins.bundle.config` 槽位（按 `key` 注册，必须等于包名 `dsharness`），所以不用多一张卡、也不用多一行 Loader 行就能看到组件状态。它画四行，前两行各自带一个复制按钮（见下）：
 
 | 组件 | 显示的状态 | 显示的事实 |
 |------|------------|------------|
-| 本机网关 | 运行中 / 未启用 | 监听端口、本机地址、共享密钥配没配 |
-| 模型 Key | 已同步 / 未同步 / 未登录 | 凭据引用名（`DSHARNESS_MODEL_KEY`）以及它有没有值 |
+| 本机网关 | 运行中 / 未启用 | 监听端口、本机地址、共享密钥配没配，**以及一个复制密钥的按钮** |
+| 模型 Key | 已同步 / 未同步 / 未登录 | 凭据引用名（`DSHARNESS_MODEL_KEY`）、它有没有值，**以及一个复制 key 的按钮** |
 | 检查更新 | 已是最新 / 有新版本 / 尚未检查 / 查询失败 | 当前版本、最新版本、实时 phase，以及打开桌面端更新对话框的按钮 |
 | 账号与费用 | 已登录 / 未登录 | 用户名（或掩码后的联系方式），以及每个钱包的余额 |
 
@@ -494,10 +554,36 @@ dsharness-relay:
 
 两点是刻意的：
 
-- **它不含任何凭据。** `tokenConfigured` 与 `modelKey.configured` 是布尔，从不回值；没有任何字段装着共享密钥或模型 Key。唯一显示共享密钥的面仍是 `/dsharness/gateway` 与 `/dsharness/gateway.json`，它们和这一面一样只在回环上回。
+- **它不含任何凭据。** `tokenConfigured` 与 `modelKey.configured` 是布尔，从不回值；没有任何字段装着共享密钥或模型 Key。取一个值是**另一次按需请求**（`/dsharness/secret.json`，见下），而会显示密钥的面是 `/dsharness/gateway`、`/dsharness/gateway.json` 与这一面 —— 三个都只在回环上回。
 - **只在回环上、且只读。** 非回环请求得到 `403`；非 `GET` 得到 `405`。面板里没有任何可写的东西：没有输入框、没有开关、没有配置表单 —— 面板只渲染状态槽，其它 view 只回一行 summary。版本段有 60 秒 TTL 缓存，并与更新组件共用同一个 origin，所以面板与更新页不会对「最新版本」各说一套。
 
 浏览器半边挂载时取一次状态面，之后每 10 秒轮询一次；拿到 403、超时或响应体不是对象时降级成「状态暂时读不到」，其余行照常渲染，绝不抛错。
+
+#### 两个复制按钮，以及一面只有点击才会走到的取值面
+
+用户口径：
+
+> 码农dsh插件中的本机网关一行右侧要有复制密钥的按钮，点击之后复制共享密钥
+> 模型key也是，要有复制key的按钮
+
+复制凭据是唯一一个「目的就是把值搬出去」的动作，而这改变了该由哪一面来服务它。`status.json` 不行：面板每 10 秒轮询它一次，值放进去就等于**按定时器**把它发给每一个回环客户端。所以值有自己的一面，且**只在按按钮那一刻**读：
+
+| 面 | 它给什么 | 读取节奏 |
+|----|----------|----------|
+| `GET /dsharness/status.json` | 只有状态 —— 布尔、版本、端口 | 每 10 秒轮询 |
+| `GET /dsharness/secret.json` | `{ok, gateway:{token}, modelKey:{ref,value}}` | 点一下才取，其它任何时候都不取 |
+
+`/dsharness/secret.json`（`SECRET_JSON_PATH`）与其它面并列注册为 `kind: 'exact'`，并进 `PUBLIC_PATHS`，所以门槛完全一样：回环 `GET` 得 `200`，任何非回环得 `403`，非 `GET` 得 `405`。`modelKey.value` 来自 `credentials.resolve('DSHARNESS_MODEL_KEY').value`，并降级成 `null` —— 凭据服务缺席、`resolve` 抛错、或解析不出东西，三种情况都只让这一个字段为空，而不是让请求失败，所以「没有凭据」表现为一次复制失败而不是一个 500。
+
+因此 `status.json` 那组**钉住的字段一个都没变**，依旧不含任何凭据；`dsharness.test.mjs` 既逐字段断言它，也断言取值面自己的回环门。
+
+浏览器半边里两个按钮在「本机网关」与「模型 Key」两行的右侧，两行原有的状态文字都保留。点击时取一次取值面、调 `navigator.clipboard.writeText`，然后在按钮旁显示「已复制」或「复制失败」两秒，之后回到空闲。三个性质是刻意的，且都有 `dsharness-ui.test.mjs` 的断言：
+
+- **值从不渲染。** 它从响应直接进剪贴板；不进 React 状态、不进 props、不进渲染树。只有结果（空闲 / 已复制 / 失败）是状态，所以渲染出来的面板**即使出错也漏不出密钥**。
+- **那一行没东西可复制时按钮是禁用的** —— 网关看 `tokenConfigured !== true`，模型 Key 看 `modelKey.configured !== true`。
+- **普通浏览器里也能复制。** 它只需要 `fetch` 与 `navigator.clipboard`，不依赖更新按钮需要的 `dshDesktop` 桥。没有 `navigator.clipboard` 的非安全上下文被当作**正常环境**处理：那一下显示「复制失败」。
+
+在一台装好本产品载荷、并设了 `DSHARNESS_MODEL_KEY` 的真 `dsh web` 上，用真 Chromium 实测：两个按钮都可用；两次点击都把正确的值放进了**真实剪贴板**（30 字符的网关密钥与 26 字符的模型 key，各自与取值面返回的一致）；两行都显示「已复制」；两个值都没有出现在页面文本里；而 `status.json` 依旧恰好是 `["account","address","checkedAt","cookieName","gatewayPath","loginPath","modelKey","ok","port","tokenConfigured","version"]`，里面没有任何 token。
 
 ### 客户端打包时写死的地址必须能直达本产品
 

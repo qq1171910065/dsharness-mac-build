@@ -37,16 +37,18 @@ platform/
   install.mjs              write those rows, then provision the profile plugin
   provision.mjs            install this product's one bundle package and retire the four it replaced
   dsharness.mjs            the product's own bundle, host half: the local gateway, the model-key
-                           delivery loop, the update check, and the /dsharness/status.json status face
+                           delivery loop, the update check, and the /dsharness/status.json status
+                           face plus the on-demand /dsharness/secret.json value face
   dsharness-ui.js          its browser half: the read-only component panel on the bundle's own card,
-                           the Settings › General update row, and the status face's consumer
+                           its two copy buttons, the Settings › General update row, and the status
+                           face's consumer
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
   install.test.mjs         the deployment rows and their layer precedence (14 cases)
-  provision.test.mjs       the plugin provisioning policy and the retired-package migration (26 cases)
-  dsharness.test.mjs       the merged bundle's host components and the status face (73 cases)
-  dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel (16 cases)
+  provision.test.mjs       the plugin provisioning policy, the retired-package migration, and the model catalog (34 cases)
+  dsharness.test.mjs       the merged bundle's host components and the status + value faces (76 cases)
+  dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel, the copy buttons (22 cases)
   deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (23 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
@@ -93,7 +95,7 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugin this product ships into every profile it finds (see the plugins section below). `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated package, our dependency entry and our selection.
+The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugin this product ships into every profile it finds (see the plugins section below). `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated package, our dependency entry, our selection, and the model catalog block it wrote into each profile's own patch file (see the catalog section below).
 
 `DSHARNESS_SKIP_INSTALL=1` makes `dev-all.ps1` pass `--no-marketplace`, because that switch already means "do not use the network here".
 
@@ -271,6 +273,11 @@ rows: [dsharness]        overrides: []
 The channel itself answers 200 for the correct secret while wrong or absent secrets stay
 401 — `check-host-auth.mjs` covers that against the live Host.
 
+Provisioning writes three things, not one: the package and those two manifest flags, plus a
+managed **model-catalog block** into the profile's own `cordis.patch.yml` — the layer the
+Settings › Models page reads (see that section below). `provisionProfile(...).catalog` reports
+which ids it wrote, and `--remove` takes the block back together with everything else.
+
 #### One row, three sub-plugins, per-component config
 
 `apply()` mounts the three host components as Cordis sub-plugins —
@@ -410,6 +417,7 @@ component renders both:
 |---------|---------------|
 | `GET /dsharness/gateway` | an HTML page: port, local address, shared secret, cookie name, login path, and a copy button |
 | `GET /dsharness/gateway.json` | the same facts as JSON, for callers and for the acceptance check |
+| `GET /dsharness/secret.json` | the two values themselves, on demand — what the panel's two copy buttons read (see the status-panel section) |
 
 Three details are deliberate:
 
@@ -434,6 +442,9 @@ These surfaces are registered as `kind: 'exact'` routes and additionally allowed
 `authorizeIndex`: `webServer.match()` checks the exact table first, but `frontend-static`
 delegates index requests to `authorizeIndex`, which accepts only `GET /` — so without that
 allowance these pages would be reachable only if route registration happened to win the race.
+`/dsharness/secret.json` is registered the same way and named in the same `PUBLIC_PATHS` list;
+the allow-list only decides whether a request reaches a handler, so the loopback gate inside
+each handler stays the thing that refuses an off-host caller.
 
 
 The gateway component wraps `connection.requestRejection` and `connection.authorizeIndex` instead of registering a route, because `/api` is already claimed: `webServer.register` throws on a duplicate `(kind, path)`, and the upgrade path is registered separately by `api-gateway`. Both admission decisions funnel through those two service methods, so one wrap covers every carrier.
@@ -537,6 +548,85 @@ dsharness-relay:
 
 `baseURL`, `api` and the model catalog match what `GET /api/config` already delivers
 (`server/src/lib/defaults.ts`), so the model picker and the server agree.
+
+### The Settings › Models page reads its catalog from the profile's own patch layer
+
+The user asked for the model catalog to be there by default, with the input types it supports:
+
+> 码农ai模型配置中的模型目录要默认给我配置好deepseek-v4.1-flash，且输入类型要支持文本和图片
+
+The runtime was already correct — the rows above are composed by `readProfilePatches`
+(`packages/boot/app-boot/src/profile-context.ts:63`) as *bundle layers → the profile's patch →
+`$DSH_HOME/cordis.patch.yml` → overlays*, last write wins — yet the page said
+「正在使用适配器默认模型」 (the adapter's default model) and showed no models. The reason is that
+the page reads a **different set of layers** than the runtime:
+
+| reader | layers it composes | winner per row id |
+|--------|--------------------|-------------------|
+| the runtime (`readProfilePatches`) | bundle layers → profile patch → home patch → overlays | **last** |
+| Settings › Models (`ConfigEditor.configuration()`, `packages/boot/config-editor/src/index.ts:49-70`) | bundle layers + the profile's patch only | **first** |
+
+First-row-wins is why the home layer cannot fix the page: every profile's bundle list starts
+with `@deepseek-ai/dsh-base`, and that bundle already declares `- id: llm-pi-ai`
+(`packages/bundle/base/cordis.patch.yml:127`) with no `providers`, so that empty row is the one
+the card inherits. A row in the **profile's own** patch does win for the page (it becomes the
+card's override, which renders as 「已自定义模型目录」 + 「恢复默认模型」), so that is where the
+catalog goes.
+
+`provision.mjs` therefore writes a managed block into **each profile's own `cordis.patch.yml`**,
+carrying the same two rows the home layer carries:
+
+```yaml
+# >>> dsharness model catalog
+# Written by platform/provision.mjs: the deployment model catalog the 设置 › 模型 page
+# reads as this profile's own override. Rows are edited from that page; everything
+# outside this block is left exactly as it was.
+- id: llm-pi-ai
+  config:
+    providers:
+      dsharness-relay:
+        displayName: '码农AI'
+        api: 'openai-completions'
+        baseURL: 'https://ai.czmanong.com/v1'
+        apiKeyEnv: 'DSHARNESS_MODEL_KEY'
+        models:
+          - id: 'deepseek-v4.1-flash'
+            name: 'DeepSeek V4.1 Flash'
+            contextWindow: 262144
+            maxTokens: 32768
+            input: ['text', 'image']
+- id: agent-default-model
+  config:
+    provider: 'dsharness-relay'
+    model: 'deepseek-v4.1-flash'
+# <<< dsharness model catalog
+```
+
+`MODEL_CATALOG_ROWS` is that pair; `ensureProfileCatalog` writes it, `missingCatalogRows`
+decides whether to, `removeProfileCatalog` takes it back (which `install.mjs --remove` calls),
+and `provisionProfile` reports what it wrote as `catalog`. **`platform/cordis.patch.yml` was
+deliberately not changed** — the home layer is still the runtime's own copy of these rows, and a
+reader who knows `install.mjs` manages that file would otherwise expect them there.
+
+It never clobbers, and all three rules are in `missingCatalogRows`:
+
+- the profile already has its own `llm-pi-ai` row **outside** the managed block — that catalog is
+  the person's or the settings page's, and the whole file is left byte-identical;
+- the managed block is already present — rewriting it would undo an edit the page made in place;
+- composing the profile with the home layer yields something that is **not** this deployment's —
+  an operator replaced the home row, and a profile row would then silently take over the
+  runtime, so it defers instead.
+
+A rerun on a provisioned profile therefore writes no byte at all.
+
+For the runtime this changes **nothing**: the same config is composed last from the home layer
+either way, so `--dump-config` prints the same rows with the block present or absent, differing
+only in the per-layer provenance comments the dump emits. Writing it changes what the page
+shows, not what the model runs on. Measured on a real `dsh web` home with a real Chromium, on a
+fresh profile: the card shows 「已自定义模型目录」 + 「恢复默认模型」, `模型 ID 1` is
+`deepseek-v4.1-flash`, `显示名称 1` is `DeepSeek V4.1 Flash`, the context window is `262144`, the
+maximum output is `32768` tokens, and the 输入类型 checkboxes are **文本 checked and 图片
+checked**.
 
 ### Why the account-backed model route is switched off
 
@@ -685,12 +775,13 @@ Settings row and the panel's update row are now the same update component, not t
 
 The panel is the `plugins.bundle.config` slot on the bundle's **own card** in the Plugins page
 (registered by `key`, which must equal the package name `dsharness`), so the component state is
-visible without adding a card or a Loader row. It draws four rows:
+visible without adding a card or a Loader row. It draws four rows, and the first two carry a
+copy button of their own (see below):
 
 | component | state it shows | facts it shows |
 |-----------|----------------|----------------|
-| 本机网关 (local gateway) | running / off | listening port, local address, whether the shared secret is configured |
-| 模型 Key (model key) | synced / not synced / signed out | the credential reference name (`DSHARNESS_MODEL_KEY`) and whether it holds a value |
+| 本机网关 (local gateway) | running / off | listening port, local address, whether the shared secret is configured, **and a copy button for the secret** |
+| 模型 Key (model key) | synced / not synced / signed out | the credential reference name (`DSHARNESS_MODEL_KEY`), whether it holds a value, **and a copy button for the key** |
 | 检查更新 (update check) | up to date / a version is available / not checked yet / check failed | current version, latest version, the live phase, and the button that opens the Desktop update dialog |
 | 账号与费用 (account & billing) | signed in / signed out | the user's name (or a masked contact), and the balance per wallet |
 
@@ -708,9 +799,9 @@ registers. Its fields are exactly:
 Two properties are deliberate:
 
 - **It carries no credential.** `tokenConfigured` and `modelKey.configured` are booleans,
-  never values; there is no field holding the shared secret or the model key. The only
-  surfaces that show the shared secret remain `/dsharness/gateway` and
-  `/dsharness/gateway.json`, and they stay loopback-only alongside this one.
+  never values; there is no field holding the shared secret or the model key. Reading a value is
+  a separate, on-demand request (`/dsharness/secret.json`, next), and the surfaces that show the
+  secret are `/dsharness/gateway`, `/dsharness/gateway.json` and that one — all loopback-only.
 - **It is loopback-only and read-only.** A non-loopback request gets `403`; a non-`GET` gets
   `405`. Nothing in the panel is writable: no input, no switch, no config form — the panel
   renders the status slot and returns a one-line summary for any other view. The version
@@ -720,6 +811,57 @@ Two properties are deliberate:
 The browser half polls the face once at mount and then every 10 s, and degrades to "status is
 unavailable right now" on a 403, a timeout, or a malformed body — the other rows still render,
 and it never throws.
+
+#### Two copy buttons, and a second face that only a click reaches
+
+The user asked for a copy button on two of those rows:
+
+> 码农dsh插件中的本机网关一行右侧要有复制密钥的按钮，点击之后复制共享密钥
+> 模型key也是，要有复制key的按钮
+
+Copying a credential is the one action whose whole point is to move a value out, and that
+changes which face can serve it. `status.json` cannot: the panel polls it every 10 s, so a
+value in it would be sent to every loopback client on a timer. The value therefore has its own
+face, read **only** when the button is pressed:
+
+| surface | what it gives | cadence |
+|---------|---------------|---------|
+| `GET /dsharness/status.json` | state only — booleans, versions, the port | polled every 10 s |
+| `GET /dsharness/secret.json` | `{ok, gateway:{token}, modelKey:{ref,value}}` | fetched on a click, and never otherwise |
+
+`/dsharness/secret.json` (`SECRET_JSON_PATH`) is registered `kind: 'exact'` beside the other
+faces and added to `PUBLIC_PATHS`, so it is reachable on the same terms: a loopback `GET` gets
+`200`, anything non-loopback gets `403`, and a non-`GET` gets `405`. `modelKey.value` comes from
+`credentials.resolve('DSHARNESS_MODEL_KEY').value` and degrades to `null` — no store, a
+`resolve` that throws, or nothing resolved — rather than failing the request, so a missing
+credential reads as a failed copy and not as a 500.
+
+The pinned field set of `status.json` is therefore **unchanged** and still holds no credential;
+that is what `dsharness.test.mjs` asserts, field by field, alongside the value face's own
+loopback gate.
+
+In the browser half the two buttons sit at the right of the 本机网关 and 模型 Key rows, both rows
+keeping their existing state text. A click fetches the value face and calls
+`navigator.clipboard.writeText`, then shows 「已复制」 or 「复制失败」 next to the button for two
+seconds before returning to idle. Three properties are deliberate and each is asserted by
+`dsharness-ui.test.mjs`:
+
+- **The value never renders.** It goes from the response straight into the clipboard; it is
+  never put in React state, in props, or in the tree. Only the outcome (idle / copied / failed)
+  is state, which is why a rendered panel cannot leak the secret even by accident.
+- **A button is disabled when its row has nothing to copy** — `tokenConfigured !== true` for the
+  gateway, `modelKey.configured !== true` for the model key.
+- **Copy works in a plain browser.** It needs only `fetch` and `navigator.clipboard`, so it does
+  not depend on the `dshDesktop` bridge the update button needs. A non-secure context without
+  `navigator.clipboard` is treated as a normal environment: the click reports 「复制失败」.
+
+Verified against a real `dsh web` host with the product payload installed and
+`DSHARNESS_MODEL_KEY` set, driven in a real Chromium: both buttons enabled, both clicks put the
+right value on the actual clipboard (a 30-character gateway secret and a 26-character model key,
+each equal to what the face returns), each row showed 「已复制」, neither value appeared anywhere
+in the page text, and `status.json` still had exactly
+`["account","address","checkedAt","cookieName","gatewayPath","loginPath","modelKey","ok","port","tokenConfigured","version"]`
+with no token in it.
 
 ### The origin the client is built with must reach this product directly
 

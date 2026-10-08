@@ -5,12 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   MARKETPLACE_PACKAGE,
+  MODEL_CATALOG_ROWS,
   PROFILE_PLUGINS,
   REPLACED_PLUGINS,
+  ensureProfileCatalog,
+  missingCatalogRows,
   planProvisioning,
   pluginInstallSpec,
   provisionAll,
   provisionProfile,
+  removeProfileCatalog,
+  replaceCatalogBlock,
   unprovisionProfile,
   writePluginPackage,
 } from './provision.mjs';
@@ -569,8 +574,220 @@ test('provisionAll: writes the generated package into the profile it belongs to'
       // The browser half lands beside it, which is what the client roster serves.
       assert.ok(existsSync(join(dir, 'node_modules', plugin.name, 'client.js')));
     }
-    // No second copy elsewhere in the harness home.
+    // No second copy elsewhere in the harness home. The catalog rows go into the
+    // profile's own patch file, so they add no artifact out here.
     assert.deepEqual(readdirSync(root).filter((name) => name !== 'profiles'), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The model catalog the 设置 › 模型 page reads.
+ *
+ * Measured this round, and the reason these rows exist at all:
+ * `ConfigEditor.configuration()` (`packages/boot/config-editor/src/index.ts:49-70`)
+ * composes *bundle layers + the profile's patch* and keeps the FIRST row per id, so
+ * `@deepseek-ai/dsh-base`'s own empty `- id: llm-pi-ai`
+ * (`packages/bundle/base/cordis.patch.yml:127`) is what the card inherits. A row in a
+ * later bundle layer cannot displace it, which is why writing the catalog into the
+ * bundle layer did nothing. The home layer is not read there either — it is only what
+ * `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63`) applies
+ * for the runtime. The profile's own patch is therefore the one layer that both the
+ * page *and* the runtime read, and the assertions below are ordered by exactly those
+ * three facts.
+ */
+
+/** A value row's `config:` text as the catalog comparator sees it (dedented). */
+const CATALOG_BODY = (id) => MODEL_CATALOG_ROWS.find((row) => row.id === id).body.split('\n')
+  .map((line) => line.slice(4)).join('\n');
+
+test('model catalog: a fresh profile gets both rows, and only inside the managed block', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    assert.deepEqual(missingCatalogRows(dir), ['llm-pi-ai', 'agent-default-model']);
+    assert.deepEqual(ensureProfileCatalog(dir), ['llm-pi-ai', 'agent-default-model']);
+    const text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    /*
+     * The header comments survive; the template's `[]` cannot, because a flow sequence
+     * and the block sequence the rows need cannot share one YAML document. That is the
+     * measured failure this replacement exists to avoid: appending rows after `[]`
+     * makes the loader throw `end of the stream or a document separator is expected`.
+     */
+    assert.ok(text.startsWith('# profile patch'), 'the profile template comments are preserved');
+    assert.ok(!/^\s*\[\s*\]\s*$/mu.test(text), 'the empty flow sequence is gone, so the rows can parse');
+    assert.match(text, /^# >>> dsharness model catalog$/mu);
+    assert.match(text, /^# <<< dsharness model catalog$/mu);
+    assert.equal(text.match(/# >>> dsharness model catalog/gu).length, 1);
+    // Both ids, as this deployment's values, at the profile layer where the page reads them.
+    assert.match(text, /^- id: llm-pi-ai$/mu);
+    assert.match(text, /^- id: agent-default-model$/mu);
+    assert.match(text, /^ {6}dsharness-relay:$/mu);
+    assert.match(text, /^ {10}- id: 'deepseek-v4\.1-flash'$/mu);
+    assert.match(text, /^ {12}input: \['text', 'image'\]$/mu);
+    assert.match(text, /^ {4}provider: 'dsharness-relay'$/mu);
+    // No row belongs to the bundle's patch: the shield's reason is unchanged.
+    assert.ok(!text.includes('@deepseek-ai/dsh-plugin-manager'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: a rerun writes nothing at all', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    const once = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    const manifest = readFileSync(join(dir, 'package.json'), 'utf8');
+    assert.deepEqual(missingCatalogRows(dir), []);
+    assert.deepEqual(ensureProfileCatalog(dir), []);
+    const second = provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    assert.deepEqual(second.catalog, []);
+    assert.equal(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'), once, 'the patch must be byte-identical');
+    assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), manifest, 'so must the manifest');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: a profile with its own catalog row is left untouched', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    // Exactly what the settings page writes: the person's own provider profile.
+    const own = [
+      '# my own catalog',
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      mine-relay:',
+      "        displayName: '我的网关'",
+      "        api: 'openai-completions'",
+      "        baseURL: 'https://example.test/v1'",
+      '        models:',
+      "          - id: 'my-model'",
+      "            input: ['text']",
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'cordis.patch.yml'), own, 'utf8');
+    assert.deepEqual(missingCatalogRows(dir), []);
+    assert.deepEqual(ensureProfileCatalog(dir), []);
+    assert.equal(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'), own, 'the person\'s catalog is not touched');
+    // A full provisioning run leaves it alone too, not merely the helper.
+    provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    assert.equal(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'), own);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: a row a person edits inside the block is not rewritten away', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    ensureProfileCatalog(dir);
+    // The settings page edits the row in place, exactly as `configEditor.edit` does.
+    const edited = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+      .replace("displayName: '码农AI'", "displayName: '我自己改过的名字'")
+      .replace("input: ['text', 'image']", "input: ['text']");
+    writeFileSync(join(dir, 'cordis.patch.yml'), edited, 'utf8');
+    assert.deepEqual(ensureProfileCatalog(dir), [], 'the block is present, so nothing is rewritten');
+    assert.deepEqual(missingCatalogRows(dir), []);
+    provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    assert.equal(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'), edited);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: the managed home rows stay the runtime\'s, and the profile rows add nothing', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    // A home layer carrying exactly what platform/cordis.patch.yml writes.
+    writeFileSync(join(root, 'cordis.patch.yml'), [
+      '- id: llm-pi-ai',
+      '  config:',
+      ...MODEL_CATALOG_ROWS.find((row) => row.id === 'llm-pi-ai').body.split('\n'),
+      '- id: agent-default-model',
+      '  config:',
+      ...MODEL_CATALOG_ROWS.find((row) => row.id === 'agent-default-model').body.split('\n'),
+    ].join('\n'), 'utf8');
+    // Same values on both layers: the profile row duplicates the home row, which is a
+    // no-op for the runtime (last write wins per row id) and only adds what the page reads.
+    assert.deepEqual(missingCatalogRows(dir), ['llm-pi-ai', 'agent-default-model']);
+    assert.equal(CATALOG_BODY('llm-pi-ai').includes('deepseek-v4.1-flash'), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: an operator-replaced home row keeps the page inherited rather than shadowed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    writeFileSync(join(root, 'cordis.patch.yml'),
+      "- id: llm-pi-ai\n  config:\n    providers:\n      operator-relay:\n        displayName: 'Operator'\n", 'utf8');
+    /*
+     * The composed value is not this deployment's, so the profile row would silently
+     * win over the operator's for the runtime while the page showed a different
+     * catalog. Nothing is written; the operator's catalog stays the only one.
+     */
+    assert.deepEqual(missingCatalogRows(dir), []);
+    assert.deepEqual(ensureProfileCatalog(dir), []);
+    assert.equal(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8'), '# profile patch\n[]\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: unprovisioning takes back only the block it wrote', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    const template = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    ensureProfileCatalog(dir);
+    // One operator row of their own, outside the block.
+    writeFileSync(join(dir, 'cordis.patch.yml'),
+      `${readFileSync(join(dir, 'cordis.patch.yml'), 'utf8').trimEnd()}\n\n- id: tool-ralph\n  disabled: false\n`, 'utf8');
+    const report = unprovisionProfile(root, 'desktop');
+    assert.equal(report.catalog, true);
+    const text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    assert.ok(!text.includes('# >>> dsharness model catalog'));
+    assert.match(text, /^- id: tool-ralph$/mu, 'an operator row outside the block stays');
+    // The template's own content is still there, so a second provisioning round starts clean.
+    assert.ok(text.startsWith(template.trimEnd().split('\n').slice(0, 1)[0]));
+    assert.deepEqual(removeProfileCatalog(dir), false, 'removing twice reports nothing to take back');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('model catalog: replaceCatalogBlock is idempotent and repairs a truncated block', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-catalog-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    const template = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    const block = '# >>> dsharness model catalog\n- id: llm-pi-ai\n  config: {}\n# <<< dsharness model catalog';
+    const appended = replaceCatalogBlock(template, block);
+    assert.equal(replaceCatalogBlock(appended, block), appended, 'replacing twice changes nothing');
+    assert.equal(appended.match(/# >>> dsharness model catalog/gu).length, 1);
+    // Appending to the template's `[]` would make the file unparsable YAML, so the
+    // empty flow sequence is dropped while the header comments stay.
+    assert.ok(!/^\s*\[\s*\]\s*$/mu.test(appended));
+    assert.match(appended, /^# profile patch/u);
+    // A truncated block (begin marker, no end marker) is treated as running to the end
+    // and rewritten whole, so a damaged file can never grow a second copy.
+    const truncated = `${appended.slice(0, appended.indexOf('# >>> '))}# >>> dsharness model catalog\n- id: llm-pi-ai\n  config: {}\n`;
+    const repaired = replaceCatalogBlock(truncated, block);
+    assert.equal(repaired.match(/# >>> dsharness model catalog/gu).length, 1);
+    // Removing the block returns a file that still carries a value, never an empty document.
+    const emptied = replaceCatalogBlock(appended, '');
+    assert.equal(emptied.trimEnd().split('\n').at(-1), '[]');
+    assert.equal(replaceCatalogBlock(emptied, ''), emptied);
+    assert.equal(emptied.match(/^# >>> /gmu), null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

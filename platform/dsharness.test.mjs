@@ -15,6 +15,7 @@ import {
   PANEL_JSON_PATH,
   PUBLIC_PATHS,
   RELEASE_PATH,
+  SECRET_JSON_PATH,
   STATUS_JSON_PATH,
   STATUS_PATH,
   TOKEN_REF,
@@ -438,18 +439,24 @@ test('sendJson: no caching, and an exact content-length for the encoded body', (
   assert.deepEqual(JSON.parse(written.body), { ok: true, text: '中文' });
 });
 
-test('PUBLIC_PATHS: the login page, both gateway faces and the status face are all allowed', () => {
+test('PUBLIC_PATHS: the login page, both gateway faces, the status face and the on-demand value face', () => {
   /*
    * `frontend-static` hands `/` to `connection.authorizeIndex`, which only lets `GET /`
    * through and ends the response otherwise. Without these entries whether our own paths
    * answer would depend on route registration order — a bug that appears and disappears
-   * between runs. The status face belongs here because it holds no credential.
+   * between runs. The status face belongs here because it holds no credential; the value
+   * face does not hold one in its *URL* either, and its own loopback gate is what refuses
+   * a request that reached it.
    */
-  assert.deepEqual([...PUBLIC_PATHS].sort(), [LOGIN_PATH, STATUS_PATH, STATUS_JSON_PATH, PANEL_JSON_PATH].sort());
+  assert.deepEqual(
+    [...PUBLIC_PATHS].sort(),
+    [LOGIN_PATH, STATUS_PATH, STATUS_JSON_PATH, PANEL_JSON_PATH, SECRET_JSON_PATH].sort(),
+  );
   assert.equal(LOGIN_PATH, '/dsharness/auth');
   assert.equal(STATUS_PATH, '/dsharness/gateway');
   assert.equal(STATUS_JSON_PATH, '/dsharness/gateway.json');
   assert.equal(PANEL_JSON_PATH, '/dsharness/status.json');
+  assert.equal(SECRET_JSON_PATH, '/dsharness/secret.json');
 });
 
 /* -------------------------------------------------------------------------
@@ -833,7 +840,7 @@ async function serve(route, { method = 'GET', host = '127.0.0.1:13094' } = {}) {
   return written;
 }
 
-test('gatewayComponent: the three read-only faces register as exact routes', () => {
+test('gatewayComponent: every read-only face registers as an exact route', () => {
   /*
    * `exact` is load-bearing: `webServer.match()` consults the exact table before the
    * prefix fallback (`packages/host/webserver/src/index.ts:319-328`), so an exact route
@@ -842,7 +849,10 @@ test('gatewayComponent: the three read-only faces register as exact routes', () 
    */
   const { ctx, routes } = webServerContext();
   gatewayComponent.apply(ctx, { token: 'x'.repeat(MIN_TOKEN_LENGTH), home: 'C:/home' });
-  assert.deepEqual(routes.map((route) => route.path).sort(), [LOGIN_PATH, STATUS_PATH, STATUS_JSON_PATH, PANEL_JSON_PATH].sort());
+  assert.deepEqual(
+    routes.map((route) => route.path).sort(),
+    [LOGIN_PATH, STATUS_PATH, STATUS_JSON_PATH, PANEL_JSON_PATH, SECRET_JSON_PATH].sort(),
+  );
   for (const route of routes) assert.equal(route.kind, 'exact');
 });
 
@@ -876,7 +886,7 @@ test('gatewayComponent: a credential store that refuses the write does not stop 
   const { ctx, routes, logged } = webServerContext({ get: { credentials: { set: async () => { throw new Error('read-only store'); } } } });
   gatewayComponent.apply(ctx, { home: 'C:/home' });
   await new Promise((resolve) => { setTimeout(resolve, 20); });
-  assert.equal(routes.length, 4);
+  assert.equal(routes.length, 5);
   assert.ok(logged.some((line) => line.includes('未能保存')));
 });
 
@@ -1117,4 +1127,105 @@ test('status face: the version section is a 3-field object even when the remote 
   assert.deepEqual(Object.keys(body.version).sort(), ['current', 'latest', 'updateAvailable']);
   assert.equal(body.version.latest, null);
   assert.equal(body.version.updateAvailable, false);
+});
+
+/* -------------------------------------------------------------------------
+ * The on-demand value face: what the two copy buttons read, on the click
+ * ---------------------------------------------------------------------- */
+
+/** A value-face fetch through the real handler, mounted on the same component. */
+async function readSecret({ credentials, host = '127.0.0.1:13094', method = 'GET' } = {}) {
+  const { ctx, routes } = webServerContext({
+    get: credentials === undefined ? {} : { credentials },
+  });
+  gatewayComponent.apply(ctx, { token: 'x'.repeat(MIN_TOKEN_LENGTH), home: 'C:/nowhere', origin: 'http://127.0.0.1:1' });
+  const route = routes.find((entry) => entry.path === SECRET_JSON_PATH);
+  return serve(route, { method, host });
+}
+
+test('value face: exact route, pinned body on loopback GET, 403 off host, 405 for a non-GET', async () => {
+  /*
+   * The two copy buttons read exactly this. It is a separate face from `status.json` on
+   * purpose: the status face is polled every 10s, and this value must only leave the
+   * process at the moment a person clicks copy.
+   */
+  const secret = 'x'.repeat(MIN_TOKEN_LENGTH);
+  const { ctx, routes } = webServerContext({
+    get: { credentials: { resolve: async () => ({ value: 'sk-model-key', source: 'file' }) } },
+  });
+  gatewayComponent.apply(ctx, { token: secret, home: 'C:/nowhere', origin: 'http://127.0.0.1:1' });
+  const route = routes.find((entry) => entry.path === SECRET_JSON_PATH);
+  assert.equal(route.kind, 'exact', 'an exact route never falls through to the SPA index');
+
+  const written = await serve(route);
+  assert.equal(written.status, 200);
+  const body = JSON.parse(written.body);
+  assert.deepEqual(Object.keys(body).sort(), ['gateway', 'modelKey', 'ok']);
+  assert.deepEqual(body, { ok: true, gateway: { token: secret }, modelKey: { ref: MODEL_KEY_REF, value: 'sk-model-key' } });
+  assert.deepEqual(Object.keys(body.gateway), ['token']);
+  assert.deepEqual(Object.keys(body.modelKey).sort(), ['ref', 'value']);
+  assert.equal(written.headers['cache-control'], 'no-store');
+
+  // A LAN address reaching this route gets nothing: it is a credential surface.
+  const offHost = await serve(route, { host: '192.168.1.5:13094' });
+  assert.equal(offHost.status, 403);
+  assert.equal(JSON.parse(offHost.body).ok, false);
+  assert.ok(!offHost.body.includes(secret));
+
+  const posted = await serve(route, { method: 'POST' });
+  assert.equal(posted.status, 405);
+  assert.ok(!posted.body.includes(secret));
+});
+
+test('value face: the model key is null — and nothing throws — with no store, a throw, or no value', async () => {
+  /*
+   * The handler must never throw: a 500 here reaches the user as a broken panel rather
+   * than one failed copy. Every way the credential can be absent degrades to `null` in
+   * that one field, and the gateway value is unaffected.
+   */
+  const cases = [
+    ['no credential service', undefined],
+    ['resolve throws', { resolve: async () => { throw new Error('vault sealed'); } }],
+    ['nothing configured', { resolve: async () => undefined }],
+    ['a non-string value', { resolve: async () => ({ value: 42, source: 'file' }) }],
+  ];
+  for (const [name, credentials] of cases) {
+    const written = await readSecret({ credentials });
+    assert.equal(written.status, 200, name);
+    const body = JSON.parse(written.body);
+    assert.equal(body.modelKey.value, null, name);
+    assert.equal(body.modelKey.ref, MODEL_KEY_REF, name);
+    assert.equal(body.gateway.token.length >= MIN_TOKEN_LENGTH, true, name);
+  }
+});
+
+test('value face: the secret appears there and nowhere in the status face', async () => {
+  /*
+   * The one negative assertion the two-face split exists for (用户口径：「插件的组件中只是
+   * 显示组件状态，而不需要显示 key 的信息」): the polled face still holds no value, and the
+   * response of the on-demand face is the only place the value ever is.
+   */
+  const secret = 'x'.repeat(MIN_TOKEN_LENGTH);
+  const modelKeyValue = 'sk-only-in-the-value-face';
+  const credentials = {
+    describe: async (ref) => ({ configured: ref === MODEL_KEY_REF, writable: true }),
+    resolve: async () => ({ value: modelKeyValue, source: 'file' }),
+    readRecord: async () => undefined,
+    set: async () => undefined,
+  };
+  const { ctx, routes } = webServerContext({ get: { credentials } });
+  gatewayComponent.apply(ctx, { token: secret, home: 'C:/nowhere', origin: 'http://127.0.0.1:1' });
+
+  const value = await serve(routes.find((entry) => entry.path === SECRET_JSON_PATH));
+  const panel = await serve(routes.find((entry) => entry.path === PANEL_JSON_PATH));
+  assert.ok(value.body.includes(secret));
+  assert.ok(value.body.includes(modelKeyValue));
+  assert.ok(!panel.body.includes(secret), 'the polled status face must not carry the shared secret');
+  assert.ok(!panel.body.includes(modelKeyValue), 'the polled status face must not carry the model key');
+  assert.ok(!/"(?:token|secret|apiKey|value)":/u.test(panel.body), 'and names no credential field at all');
+  // Its field set is unchanged by anything this round added.
+  assert.deepEqual(Object.keys(JSON.parse(panel.body)).sort(), [
+    'account', 'address', 'checkedAt', 'cookieName', 'gatewayPath', 'loginPath',
+    'modelKey', 'ok', 'port', 'tokenConfigured', 'version',
+  ].sort());
 });

@@ -33,6 +33,19 @@
  * page's own switch could never override it. `platform/cordis.patch.yml` carries the
  * measurement, the reasoning, and why an upstream row is the exception.
  *
+ * ## The one row set this file does NOT carry: the model catalog
+ *
+ * The runtime reads this file, but 设置 › 模型 does not:
+ * `ConfigEditor.configuration()` (`packages/boot/config-editor/src/index.ts:49-70`)
+ * composes *bundle layers + the profile's patch* and keeps the **first** row per id,
+ * so `@deepseek-ai/dsh-base`'s own `- id: llm-pi-ai`
+ * (`packages/bundle/base/cordis.patch.yml:127`) is what the page inherits — an empty
+ * catalog, hence 「正在使用适配器默认模型」. A second row in any later bundle layer
+ * cannot displace it, because first-row-wins is by row id, not by layer. The catalog
+ * that page must show is therefore written by `provision.mjs` into each **profile's**
+ * own patch layer ({@link MODEL_CATALOG_ROWS}), guarded so a row the person already
+ * has is never touched.
+ *
  * ## Why the managed block, and why no YAML library
  *
  * The file is a top-level YAML array and the loader applies it **in order, last
@@ -146,7 +159,8 @@ function main() {
       process.stdout.write(
         report.status === 'skipped'
           ? `[platform] ${report.profile}: nothing to remove (${report.reason})\n`
-          : `[platform] ${report.profile}: removed ${report.removed.join(', ') || 'nothing'}\n`,
+          : `[platform] ${report.profile}: removed ${report.removed.join(', ') || 'nothing'}`
+            + `${report.catalog ? '; removed the model catalog block' : ''}\n`,
       );
     }
     return;
@@ -167,7 +181,11 @@ function main() {
   process.stdout.write('[platform] managed rows: deepseek-account, llm-pi-ai (dsharness-relay), agent-default-model, llm-deepseek-account (disabled)\n');
   for (const line of describeReports(reports, dryRun)) process.stdout.write(`${line}\n`);
   process.stdout.write(`[platform] account origin: ${origin}\n`);
-  process.stdout.write('[platform] model route: dsharness-relay -> https://ai.czmanong.com/v1 (码农AI), default deepseek-v4.1-flash\n');
+  process.stdout.write(`[platform] model route: dsharness-relay -> https://ai.czmanong.com/v1 (码农AI), default deepseek-v4.1-flash\n`);
+  process.stdout.write(
+    '[platform] 设置 › 模型 catalog: written into each profile\'s own cordis.patch.yml'
+    + ' (the page reads that layer, not this file); an existing row is never rewritten\n',
+  );
   // Never print the secret itself, only whether one is present.
   process.stdout.write(
     `[platform] host auth token: ${token.length >= 16

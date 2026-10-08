@@ -47,8 +47,12 @@
  *
  * 用户口径：「插件的组件中只是显示组件状态，而不需要显示 key 的信息」。
  * 所以 `GET /dsharness/status.json` **只**回布尔与版本号：`tokenConfigured`
- * 与 `modelKey.configured` 是布尔，从不回密钥值或模型 Key 的值。唯一显示密钥的
- * 面仍是 `/dsharness/gateway`（只在回环上渲染，且那是给运行 DSH 的人自己看的）。
+ * 与 `modelKey.configured` 是布尔，从不回密钥值或模型 Key 的值。
+ *
+ * 凭据值只在**用户点「复制」那一下**才读：`GET /dsharness/secret.json`
+ * （{@link SECRET_JSON_PATH}）按需回一次值。为什么不并进 `status.json`：那一面
+ * 每 10 秒被轮询一次，值是「按需读」的语义，不是「持续可见」的语义。
+ * `/dsharness/gateway` 是另一条给人看的明文面（只在回环上渲染）。
  *
  * ## 为什么是一个文件
  *
@@ -163,14 +167,28 @@ export const STATUS_JSON_PATH = '/dsharness/gateway.json'
 export const PANEL_JSON_PATH = '/dsharness/status.json'
 
 /**
+ * 按需读取凭据值的面（`platform/dsharness-ui.js` 的复制按钮消费它）。
+ *
+ * ⚠️ 与 {@link PANEL_JSON_PATH} 分开是刻意的：面板每 10 秒轮询一次状态，
+ * 而凭据值是**用户点「复制」那一刻**才读的东西。并进状态面等于把它变成
+ * 每 10 秒过一次的网络常量；分成独立一面，「值只在点的时候离开进程」这条
+ * 就落在一个可断言的位置上。它和另外几条一样是回环专属（非回环 403）。
+ */
+export const SECRET_JSON_PATH = '/dsharness/secret.json'
+
+/**
  * 公开路径：即使连接层拒了请求，也必须能读到的那几条。
  *
  * `frontend-static` 把 `/` 交给 `ctx.connection.authorizeIndex`，**先拒绝就
  * 直接结束响应**。而 `authorizeIndex` 只放行 `GET /`（带 cookie / 启动 token），
  * 所以本组件自己的路径必须在这里放行，否则它们的可读性取决于**路由注册顺序**。
  * `GET` 之外的方法不放行。
+ *
+ * ⚠️ `SECRET_JSON_PATH` 也在这里：放行只决定「请求能不能到达 handler」，
+ * 回环判断是 handler 自己的第一道门（非回环 403）。不放行反而会让它的可读性
+ * 取决于注册顺序 —— 那正是这张表存在的理由。
  */
-export const PUBLIC_PATHS = [LOGIN_PATH, STATUS_PATH, STATUS_JSON_PATH, PANEL_JSON_PATH]
+export const PUBLIC_PATHS = [LOGIN_PATH, STATUS_PATH, STATUS_JSON_PATH, PANEL_JSON_PATH, SECRET_JSON_PATH]
 
 /**
  * 自动生成并持久化密钥时用的凭据引用名。
@@ -789,6 +807,25 @@ export const gatewayComponent = {
           }
         }
 
+        /**
+         * 凭据层里的模型 Key 明文 —— **只给按需取值面用**。
+         *
+         * 每次现取，不做进程内缓存：用户在设置里换了 Key 之后，复制按钮必须拿到
+         * 新的那一把，否则「复制」会把一个已经失效的值交给用户。
+         *
+         * @returns 明文值；服务缺席 / `resolve` 抛错 / 取不到字符串一律 `null`。
+         */
+        const secretModelKey = async () => {
+          const store = webCtx.get('credentials')
+          if (store === undefined) return null
+          try {
+            const resolved = await store.resolve(MODEL_KEY_REF)
+            return typeof resolved?.value === 'string' ? resolved.value : null
+          } catch {
+            return null
+          }
+        }
+
         /** 账号与费用：登录状态 + 钱包余额。任一服务缺席或失败都降级成未登录。 */
         const panelAccount = async () => {
           const account = webCtx.get('deepseekAccount')
@@ -864,6 +901,41 @@ export const gatewayComponent = {
             })
           },
         }), `${name}/gateway: ${PANEL_JSON_PATH}`)
+
+        /*
+         * 按需取值面 —— 面板上的「复制」按钮点下去那一刻才走这里。
+         *
+         * 用户口径：「本机网关一行右侧要有复制密钥的按钮，点击之后复制共享密钥」
+         * 「模型 key 也是，要有复制 key 的按钮」。
+         *
+         * 三条刻意的设计：
+         *
+         * - **值只在这一面的响应里**。`status.json` 依旧只有布尔，所以「显示状态」
+         *   与「取走值」是两次请求，两个语义。
+         * - **模型 Key 一律降级成 `value: null`**：凭据服务缺席、`resolve` 抛错、
+         *   解析不出字符串 —— 三种情况都只让这一个字段为空，绝不把异常抛出 handler
+         *   （那会让复制按钮点出一次 500，而不是一句「复制失败」）。
+         * - **非回环一律 403**：这是凭据面，`status.json` 的回环门同样适用。
+         */
+        webCtx.effect(() => webCtx.webServer.register({
+          kind: 'exact',
+          path: SECRET_JSON_PATH,
+          handler: async (req, res) => {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { ok: false, message: '只支持 GET' })
+              return
+            }
+            if (!isLoopbackRequest(req)) {
+              sendJson(res, 403, { ok: false, message: '凭据只在运行 DSH 的机器上可读' })
+              return
+            }
+            sendJson(res, 200, {
+              ok: true,
+              gateway: { token: settings.token },
+              modelKey: { ref: MODEL_KEY_REF, value: await secretModelKey() },
+            })
+          },
+        }), `${name}/gateway: ${SECRET_JSON_PATH}`)
       })
     }
 

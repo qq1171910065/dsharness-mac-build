@@ -62,6 +62,15 @@
  * `version`、`account`。拿不到、403、超时、JSON 不是对象 —— 一律降级成
  * 「状态暂时读不到」，其余部分照常渲染，绝不抛错。
  *
+ * ## 值只有一个来源，而且只在点击时读：`GET /dsharness/secret.json`
+ *
+ * 「本机网关」与「模型 Key」两行右侧各有一个复制按钮（用户口径：「本机网关一行
+ * 右侧要有复制密钥的按钮，点击之后复制共享密钥」「模型 key 也是，要有复制 key
+ * 的按钮」）。值走**另一个面**、在**点击那一刻**取：状态面每 10s 轮询一次，
+ * 把值并进它就等于让它每 10s 过一次网络。取到的值只经过点击处理器一路到
+ * `navigator.clipboard.writeText`，不进 React 状态、不进 props、不进渲染树 ——
+ * 能画出来的只有结果（空闲 / 已复制 / 复制失败，2s 后自己消失）。
+ *
  * 风格只允许 `--dsw-*` CSS 自定义属性（沿用 `update-ui.js` 的写法），
  * 颜色写在内联 style 对象里：经典脚本不能 import CSS。
  */
@@ -74,8 +83,19 @@ window.__ModuleLoader__.load({
     /** 只读状态面的路径；宿主半在 loopback 上回答，非 loopback 是 403。 */
     const STATUS_PATH = '/dsharness/status.json';
 
+    /**
+     * 按需取值面的路径；与状态面**分开**，值只在用户点「复制」那一刻读。
+     *
+     * 为什么不复用状态面：那一面每 10s 被轮询一次，而凭据值是「按需读一次」
+     * 的语义。分成两个面，「值只在点击时离开进程」就落在一条可断言的路径上。
+     */
+    const SECRET_PATH = '/dsharness/secret.json';
+
     /** 轮询间隔（挂载期间）。10s 足够，且面板是给人看的，不是实时仪表。 */
     const POLL_MS = 10000;
+
+    /** 「已复制 / 复制失败」显示多久。短暂确认，不是常驻状态。 */
+    const CONFIRM_MS = 2000;
 
     /** 宿主半钉死的凭据引用名（`/dsharness/status.json` 的 `modelKey.ref`）。 */
     const MODEL_KEY_REF = 'DSHARNESS_MODEL_KEY';
@@ -89,6 +109,9 @@ window.__ModuleLoader__.load({
           note: '本产品自带的插件：四个组件常驻，不能单独关闭。',
           summary: '本机网关 / 模型 Key / 检查更新 / 账号与费用',
           unavailable: '状态暂时读不到',
+          copy: '复制',
+          copied: '已复制',
+          copyFailed: '复制失败',
         },
         component: {
           gateway: '本机网关',
@@ -156,6 +179,9 @@ window.__ModuleLoader__.load({
           note: 'This is the product\u2019s own plugin: all four components stay on and cannot be switched off individually.',
           summary: 'Local gateway / Model key / Update check / Account & billing',
           unavailable: 'Status is unavailable right now',
+          copy: 'Copy',
+          copied: 'Copied',
+          copyFailed: 'Copy failed',
         },
         component: {
           gateway: 'Local gateway',
@@ -250,6 +276,15 @@ window.__ModuleLoader__.load({
     const PANEL_TITLE = { fontSize: '14px', lineHeight: '20px', fontWeight: '600', color: 'var(--dsw-alias-label-primary)' };
     const PANEL_NOTE = { marginTop: '4px', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', lineHeight: '18px' };
     const NOTICE = { margin: '0 0 4px', color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '18px' };
+    /** 复制按钮旁边那次短暂确认：贴着按钮，不换行，避免行高一跳。 */
+    const COPY_RESULT = {
+      color: 'var(--dsw-alias-label-tertiary)',
+      fontSize: '12px',
+      lineHeight: '18px',
+      whiteSpace: 'nowrap',
+    };
+    /** 行尾控件容器：复制按钮要跟确认并排。 */
+    const COMPONENT_TRAILING = { display: 'flex', alignItems: 'center', gap: '8px', flex: 'none' };
     const COMPONENT_ROW = {
       display: 'flex',
       alignItems: 'flex-start',
@@ -282,6 +317,9 @@ window.__ModuleLoader__.load({
 
     /** 初始视图：没有 presentation、没有失败、没有正在打开。 */
     const INITIAL = { presentation: undefined, failed: false, opening: false };
+
+    /** 复制按钮的初始结果：点之前什么都不说。 */
+    const COPY_IDLE = 'idle';
 
     /** 还没有读到状态时的视图。 */
     const READING = { phase: 'reading', data: null };
@@ -333,6 +371,80 @@ window.__ModuleLoader__.load({
         ? location.origin
         : '';
       return `${origin}${STATUS_PATH}`;
+    }
+
+    /**
+     * 按需取值面的地址 —— 与状态面同一个写法：相对页面 origin，不硬编码 host。
+     * @returns 取值面的绝对 URL。
+     */
+    function secretUrl() {
+      const origin = typeof location === 'object' && location !== null && typeof location.origin === 'string'
+        ? location.origin
+        : '';
+      return `${origin}${SECRET_PATH}`;
+    }
+
+    /**
+     * 从按需取值面读一条凭据值。
+     *
+     * 只有把值交给剪贴板这一条路需要它，所以返回的就是那一个字符串：
+     * 网络错误、非 2xx、响应不是对象、挑不出非空字符串 —— 统一是 `undefined`，
+     * 由调用方折成「复制失败」。**不抛**：一次点击不该把面板打崩。
+     *
+     * @param pick - 从响应体里挑出这个组件那一条值的函数。
+     * @returns 值，或 undefined。
+     */
+    function readSecret(pick) {
+      const request = globalThis.fetch;
+      if (typeof request !== 'function') return Promise.resolve(undefined);
+      return Promise.resolve()
+        .then(() => request(secretUrl()))
+        .then((response) => (isRecord(response) && response.ok === true ? response.json() : undefined))
+        .then((data) => (isRecord(data) ? pick(data) : undefined))
+        .then(
+          (text) => (typeof text === 'string' && text !== '' ? text : undefined),
+          () => undefined,
+        );
+    }
+
+    /**
+     * 把值写进系统剪贴板。
+     *
+     * `navigator.clipboard` 在非安全上下文（http 且非回环）里不存在，那是**正常
+     * 环境**而不是异常，所以这里返回 `false` 让调用方说「复制失败」，而不是抛。
+     * @param secret - 要复制的值。
+     * @returns 是否真的写进去了。
+     */
+    function writeClipboard(secret) {
+      const clipboard = typeof navigator === 'object' && navigator !== null ? navigator.clipboard : undefined;
+      if (clipboard === null || typeof clipboard !== 'object' || typeof clipboard.writeText !== 'function') {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve().then(() => clipboard.writeText(secret)).then(() => true, () => false);
+    }
+
+    /**
+     * 取值面响应里「本机网关」那一条：网关段的 token 字段。
+     * @param data - 取值面的响应体。
+     * @returns 值，或 undefined（响应形状不认识）。
+     */
+    function gatewaySecret(data) {
+      const gateway = isRecord(data.gateway) ? data.gateway : undefined;
+      if (gateway === undefined) return undefined;
+      return gateway.token;
+    }
+
+    /**
+     * 取值面响应里「模型 Key」那一条：模型 Key 段的明文。
+     *
+     * 这是这一层**唯一**读凭据值的地方，调用点只有复制按钮的点击处理器。
+     * @param data - 取值面的响应体。
+     * @returns 值，或 undefined。
+     */
+    function modelKeySecret(data) {
+      const entry = isRecord(data.modelKey) ? data.modelKey : undefined;
+      if (entry === undefined) return undefined;
+      return entry.value;
     }
 
     /** 一个不是对象的响应体，等于没有状态。 */
@@ -442,6 +554,55 @@ window.__ModuleLoader__.load({
       return { view, open };
     }
 
+    /**
+     * 一个组件的「复制」状态：空闲 / 已复制 / 复制失败。
+     *
+     * ⚠️ **值不在这里**。点击处理器自己走 fetch → 剪贴板，hooks 只保留结果
+     * （`idle` / `copied` / `failed`），所以密钥与模型 Key 的值从来进不了
+     * React 状态，也就没有任何渲染路径能把它画出来。确认是短暂的：2s 后回 idle。
+     *
+     * `disable` 为真时按钮禁用 —— 那表示宿主半已经说了「这一项没有值」
+     * （`tokenConfigured` / `configured` 不为真），点它只会有一次注定失败的请求。
+     * @param pick - 从取值面响应里挑出这个组件那一条值的函数。
+     * @param disable - 值是否已知缺席（按钮禁用）。
+     * @returns `{ outcome, disabled, copy }`：结果、禁用态与点击动作。
+     */
+    function useCopy(pick, disable) {
+      const [outcome, setOutcome] = React.useState(COPY_IDLE);
+      const alive = React.useRef(true);
+      const timer = React.useRef(undefined);
+      React.useEffect(() => () => {
+        alive.current = false;
+        if (timer.current !== undefined && typeof globalThis.clearTimeout === 'function') {
+          globalThis.clearTimeout(timer.current);
+        }
+      }, []);
+      const copy = () => {
+        if (disable) return;
+        const settle = (next) => {
+          if (!alive.current) return;
+          setOutcome(next);
+          if (timer.current !== undefined && typeof globalThis.clearTimeout === 'function') {
+            globalThis.clearTimeout(timer.current);
+          }
+          if (typeof globalThis.setTimeout === 'function') {
+            timer.current = globalThis.setTimeout(() => {
+              timer.current = undefined;
+              if (alive.current) setOutcome(COPY_IDLE);
+            }, CONFIRM_MS);
+          }
+        };
+        Promise.resolve()
+          .then(() => readSecret(pick))
+          .then((secret) => (secret === undefined ? false : writeClipboard(secret)))
+          .then(
+            (done) => settle(done ? 'copied' : 'failed'),
+            () => settle('failed'),
+          );
+      };
+      return { outcome, disabled: disable === true, copy };
+    }
+
     /** 桌面端是否正在忙（正在打开，或处于四个忙 phase 之一）。 */
     function busy(view) {
       const presentation = view.presentation;
@@ -523,10 +684,11 @@ window.__ModuleLoader__.load({
      * @param state - 状态词。
      * @param tone - 状态点语义（`ok`/`info`/`warn`/`idle`）。
      * @param facts - 展示性事实，全部是字符串。
-     * @param trailing - 可选的行尾（更新组件的按钮）。
+     * @param trailing - 行尾控件（更新组件的按钮、复制按钮），没有就不画。
      * @returns 一行元素。
      */
     function componentRow(key, name, state, tone, facts, trailing) {
+      const controls = trailing === undefined ? [] : (Array.isArray(trailing) ? trailing : [trailing]);
       return jsxs('div', {
         style: COMPONENT_ROW,
         'data-dsharness-component': key,
@@ -550,9 +712,50 @@ window.__ModuleLoader__.load({
                 }),
             ],
           }),
-          trailing === undefined ? null : trailing,
+          controls.length === 0
+            ? null
+            : jsxs('div', { style: COMPONENT_TRAILING, children: controls }),
         ],
       });
+    }
+
+    /**
+     * 「复制」按钮 + 它旁边那次短暂确认。
+     *
+     * 值不在 props 里，也不在任何状态里：`copy` 一路把值从取值面带进
+     * `navigator.clipboard.writeText`，两边都不落地。所以在按钮上能画出来的
+     * 只有结果（「已复制」/「复制失败」），凭据值本身没有渲染路径。
+     *
+     * 值已知缺席（`tokenConfigured` / `configured` 不为真）时按钮禁用：
+     * 那时候点下去只会有一次注定失败的请求。
+     * @param key - 组件键，用来拼 `data-dsharness-copy` 与确认的 data 属性。
+     * @param label - 按钮文字（当前语言的「复制」）。
+     * @param copy - {@link useCopy} 的返回值。
+     * @param current - 当前语言的文案表。
+     * @returns 按钮与确认的元素数组。
+     */
+    function copyButton(key, label, copy, current) {
+      const notice = copy.outcome === 'copied'
+        ? current.panel.copied
+        : copy.outcome === 'failed' ? current.panel.copyFailed : undefined;
+      return [
+        jsx('button', {
+          type: 'button',
+          style: copy.disabled ? BUTTON_DISABLED : BUTTON,
+          disabled: copy.disabled,
+          'data-dsharness-copy': key,
+          onClick: copy.copy,
+          children: label,
+        }),
+        notice === undefined
+          ? null
+          : jsx('span', {
+            style: COPY_RESULT,
+            role: 'status',
+            'data-dsharness-copy-result': copy.outcome,
+            children: notice,
+          }),
+      ];
     }
 
     /**
@@ -581,13 +784,20 @@ window.__ModuleLoader__.load({
     /**
      * 四个组件行。读的字段全部来自钉死的只读契约；
      * `tokenConfigured` / `modelKey.configured` 只当布尔用，永不渲染任何密钥值。
+     *
+     * 「本机网关」与「模型 Key」两行的行尾各有一个复制按钮
+     * （用户口径：「本机网关一行右侧要有复制密钥的按钮，点击之后复制共享密钥」
+     * 「模型 key 也是，要有复制 key 的按钮」）。两个按钮走同一个 hook，
+     * 值只经过点击处理器，不进状态、不进渲染。
      * @param current - 当前语言的文案表。
      * @param data - 状态面响应体，读不到时为 null。
      * @param status - 状态面视图（更新组件用它判断「尚未检查」）。
      * @param update - 更新视图与打开动作。
+     * @param gatewayCopy - 本机网关行的复制状态与动作。
+     * @param keyCopy - 模型 Key 行的复制状态与动作。
      * @returns 四行的元素数组。
      */
-    function componentRows(current, data, status, update) {
+    function componentRows(current, data, status, update, gatewayCopy, keyCopy) {
       const facts = current.fact;
       /*
        * 「运行中 / 未启用」= 共享密钥配没配（`tokenConfigured`）。
@@ -636,10 +846,12 @@ window.__ModuleLoader__.load({
       return [
         componentRow('gateway', current.component.gateway,
           data === null ? current.state.unknown : gatewayOn ? current.state.running : current.state.disabled,
-          data === null ? 'idle' : gatewayOn ? 'ok' : 'idle', gatewayFacts),
+          data === null ? 'idle' : gatewayOn ? 'ok' : 'idle', gatewayFacts,
+          copyButton('gateway', current.panel.copy, gatewayCopy, current)),
         componentRow('modelKey', current.component.modelKey,
           data === null ? current.state.unknown : signedIn ? keyConfigured ? current.state.synced : current.state.unsynced : current.state.signedOut,
-          data === null ? 'idle' : signedIn ? keyConfigured ? 'ok' : 'warn' : 'idle', keyFacts),
+          data === null ? 'idle' : signedIn ? keyConfigured ? 'ok' : 'warn' : 'idle', keyFacts,
+          copyButton('modelKey', current.panel.copy, keyCopy, current)),
         componentRow('update', current.component.update, state.word, state.tone, updateFacts,
           jsx('button', {
             type: 'button',
@@ -666,8 +878,15 @@ window.__ModuleLoader__.load({
       const current = copy();
       const status = useStatus();
       const update = useUpdateView();
-      if (props.view !== 'page') return current.panel.summary;
+      /*
+       * 两个复制 hook 必须在早返回**之前**调用：`{ view: 'summary' }` 也走同一个
+       * 函数体（`props.view !== 'page'` 只是在后面回一行字），而 hook 的调用顺序
+       * 是 React 的硬要求，不能随 props 变化。
+       */
       const data = status.phase === 'ready' ? status.data : null;
+      const gatewayCopy = useCopy(gatewaySecret, data === null || data.tokenConfigured !== true);
+      const keyCopy = useCopy(modelKeySecret, data === null || !isRecord(data.modelKey) || data.modelKey.configured !== true);
+      if (props.view !== 'page') return current.panel.summary;
       // `div` 而不是 `section`：卡片页已经把它包在 `data-plugin-config` 的 section 里，
       // 这一层只提供内容，不重复声明 section 语义。
       return jsxs('div', {
@@ -684,7 +903,7 @@ window.__ModuleLoader__.load({
           status.phase === 'error'
             ? jsx('p', { style: NOTICE, role: 'status', children: current.panel.unavailable })
             : null,
-          ...componentRows(current, data, status, update),
+          ...componentRows(current, data, status, update, gatewayCopy, keyCopy),
         ],
       });
     }

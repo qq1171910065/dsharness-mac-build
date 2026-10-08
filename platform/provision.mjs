@@ -207,6 +207,364 @@ export const REPLACED_PLUGINS = [
 ];
 
 /**
+ * The configured model catalog the 设置 › 模型 page must show, written into each
+ * profile's **own** patch layer.
+ *
+ * ## Why the page needs a different layer from the runtime
+ *
+ * The runtime and the page answer the same question from two different places, and
+ * the home layer is only read by one of them:
+ *
+ * - **Runtime.** `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63`)
+ *   composes *bundle layers → the profile's patch → `$DSH_HOME/cordis.patch.yml` → overlays*
+ *   and applies them to the entry list with last-write-wins per row id, so the
+ *   `llm-pi-ai` row `platform/cordis.patch.yml` writes into the home layer is what
+ *   `--dump-config` prints and what the adapter actually serves.
+ * - **The page.** `ConfigEditor.configuration()`
+ *   (`packages/boot/config-editor/src/index.ts:49-70`) never reads the home layer. It
+ *   loads *bundle layers + the profile's patch*, then takes the **first** row per id:
+ *
+ *   ```ts
+ *   for (const row of flatten(composeEntries([...loaded.layers.map(layer => layer.patches), loaded.patches]))) {
+ *     if (!composed.has(row.id)) composed.set(row.id, row)
+ *   }
+ *   ```
+ *
+ *   First-row-wins is exactly why a bundle-layer override does not surface: every
+ *   profile's bundle list starts with `@deepseek-ai/dsh-base`, and that bundle already
+ *   declares `- id: llm-pi-ai` (`packages/bundle/base/cordis.patch.yml:127`), so the
+ *   empty bundle row is the first one seen and it is the one that becomes
+ *   `namespace.base` — the value `ProviderEditor`'s `inheritedModels()` reads
+ *   (`ui-settings-models/src/client/ProviderEditor.tsx:339-342`). With no `models` key
+ *   anywhere in it, the card renders 「正在使用适配器默认模型」 and no rows.
+ *
+ *   A row in the **profile's own** patch wins over the bundle row for `inherited`
+ *   (it is the `overridden` branch, `:54` → `this.inherited(...)`, `:72-80`, which
+ *   recomposes with the profile row's `config` stripped) and becomes the card's
+ *   `override` (`:66-68`), which is the state the page renders as
+ *   「已自定义模型目录」 + 「恢复默认模型」.
+ *
+ * Writing these rows into the profile layer therefore changes **only what the page
+ * shows**. For the runtime the same config is composed last, so `--dump-config` prints
+ * the same rows either way — measured on a real `dsh web` home: adding the block and
+ * removing it again leaves every row byte-identical and changes only the `# == … patched
+ * by …` provenance comments the dump emits per layer. {@link catalogDrift} is what keeps
+ * that true for an operator's own rows.
+ *
+ * ## Why writing a user layer is safe here
+ *
+ * The rows are written only when the profile carries no row for {@link CATALOG_SUBJECT}
+ * of its own and the value composed from the home layer is still this deployment's
+ * ({@link missingCatalogRows}) — so a person or operator who edited the catalog keeps it,
+ * and a rerun on a provisioned profile writes no byte. The bundle's own shield row is not
+ * touched; the catalog is not part of it.
+ */
+export const MODEL_CATALOG_ROWS = [
+  {
+    id: 'llm-pi-ai',
+    body: [
+      '    providers:',
+      '      dsharness-relay:',
+      "        displayName: '码农AI'",
+      "        api: 'openai-completions'",
+      "        baseURL: 'https://ai.czmanong.com/v1'",
+      "        apiKeyEnv: 'DSHARNESS_MODEL_KEY'",
+      '        models:',
+      "          - id: 'deepseek-v4.1-flash'",
+      "            name: 'DeepSeek V4.1 Flash'",
+      '            contextWindow: 262144',
+      '            maxTokens: 32768',
+      "            input: ['text', 'image']",
+    ].join('\n'),
+  },
+  {
+    id: 'agent-default-model',
+    body: [
+      "    provider: 'dsharness-relay'",
+      "    model: 'deepseek-v4.1-flash'",
+    ].join('\n'),
+  },
+];
+
+/** The begin marker of the catalog block in a profile patch. */
+const CATALOG_BEGIN = '# >>> dsharness model catalog';
+/** The end marker of the catalog block. */
+const CATALOG_END = '# <<< dsharness model catalog';
+/**
+ * The row the catalog exists for. The page renders the `llm-pi-ai` card; a profile
+ * that already declares this id owns its catalog and is left entirely alone.
+ */
+const CATALOG_SUBJECT = 'llm-pi-ai';
+/** The note above the rows inside the catalog block. */
+const CATALOG_NOTE = [
+  '# Written by platform/provision.mjs: the deployment model catalog the 设置 › 模型 page',
+  "# reads as this profile's own override. Rows are edited from that page; everything",
+  '# outside this block is left exactly as it was.',
+];
+
+/** One row of {@link MODEL_CATALOG_ROWS}, rendered as YAML at the profile layer. */
+function catalogRowText(id) {
+  const row = MODEL_CATALOG_ROWS.find((entry) => entry.id === id);
+  return [`- id: ${row.id}`, '  config:', row.body].join('\n');
+}
+
+/** The full managed block for the ids given, markers included, without a trailing newline. */
+function catalogBlockText(ids) {
+  return [CATALOG_BEGIN, ...CATALOG_NOTE, ...ids.map(catalogRowText), CATALOG_END].join('\n');
+}
+
+/** One file's contents, or the empty string when it is absent. */
+function readOptional(path) {
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+}
+
+/** Leading whitespace of a line. */
+function indentOf(line) {
+  return /^([ \t]*)/u.exec(line)[1];
+}
+
+/**
+ * The top-level rows of a patch file.
+ *
+ * A row starts at the outermost `- ` indentation the file uses; a nested list item
+ * (a `config:` list, such as the `models:` entries) is indented deeper and stays part
+ * of its parent's text. Only `id` and the `config:` value are read, so a row this
+ * function does not model (`insert:`, a row with no `id`) is still recognized as a
+ * boundary.
+ *
+ * @param text - patch file contents.
+ * @returns one `{ id, config }` per row; `config` is the value's text dedented one
+ *   level from the `config:` key, or `undefined` when the row declares no block value.
+ */
+function parseRows(text) {
+  const rows = [];
+  let row;
+  for (const line of text.split('\n')) {
+    const start = /^([ \t]*)- (.*)$/u.exec(line);
+    if (start !== null && (row === undefined || start[1].length <= row.indent.length)) {
+      const id = /^id:\s*(\S+)\s*$/u.exec(start[2]);
+      row = { id: id === null ? undefined : id[1], indent: start[1], lines: [line] };
+      rows.push(row);
+      continue;
+    }
+    if (row !== undefined) row.lines.push(line);
+  }
+  return rows.map(({ id, lines }) => ({ id, config: configTextOf(lines) }));
+}
+
+/**
+ * The value of a row's `config:` key: the lines below it, dedented by the indentation
+ * the value actually uses.
+ *
+ * The value's own indent is read from its first line rather than assumed to be one
+ * column past `config:`, because a hand-written patch file or a YAML dumper may use any
+ * deeper indent, and a wrong guess would turn every comparison into a mismatch.
+ *
+ * @param lines - the row's lines, starting at its `- ` line.
+ * @returns the value's text, or `undefined` when the row declares no `config:` block.
+ */
+function configTextOf(lines) {
+  const at = lines.findIndex((line) => /^\s+config:\s*$/u.test(line));
+  if (at < 0) return undefined;
+  const rest = lines.slice(at + 1);
+  const first = rest.find((line) => line.trim() !== '');
+  if (first === undefined || !first.startsWith(`${indentOf(lines[at])} `)) return '';
+  const valueIndent = indentOf(first);
+  const kept = [];
+  for (const line of rest) {
+    if (line.trim() === '') continue;
+    if (!line.startsWith(valueIndent)) break;
+    kept.push(line.slice(valueIndent.length));
+  }
+  return kept.join('\n');
+}
+
+/** The `id → config` rows of a patch file with the managed block removed. */
+function rowsOutsideCatalog(text) {
+  const outside = replaceCatalogBlock(text, '');
+  const rows = new Map();
+  for (const row of parseRows(outside)) if (row.id !== undefined) rows.set(row.id, row.config);
+  return rows;
+}
+
+/** The last `config:` value one id composes to over the patch files given. */
+function composedBody(id, ...texts) {
+  let found;
+  for (const text of texts) {
+    for (const row of parseRows(text)) if (row.id === id && row.config !== undefined) found = row.config;
+  }
+  return found;
+}
+
+/** The body of one {@link MODEL_CATALOG_ROWS} entry, dedented one level. */
+function catalogBodyOf(id) {
+  const row = MODEL_CATALOG_ROWS.find((entry) => entry.id === id);
+  return row.body.split('\n').map((line) => line.slice(4)).join('\n');
+}
+
+/**
+ * Whether writing the catalog would **change what the runtime serves**.
+ *
+ * The home layer is what `readProfilePatches`
+ * (`packages/boot/app-boot/src/profile-context.ts:63`) applies last for the runtime, so
+ * composing it with the profile layer answers whether a profile row would take over a
+ * value that is currently somebody else's:
+ *
+ * - nothing composes for the id → writing it is the only way that id ever reaches the
+ *   page, and the runtime keeps the bundle default, so this is not drift;
+ * - the composed value is this deployment's → the profile row is a no-op for the runtime;
+ * - anything else → an operator replaced the deployment's own row outside the managed
+ *   block, and the page would then show a catalog the runtime does not use.
+ *
+ * The last case defers rather than writes: the operator's catalog stays the only
+ * catalog, and the page keeps its inherited state. That is deliberate — this row is
+ * written into a file the settings page and the plugin manager share, and inventing a
+ * page-only catalog over an operator's would be the exact "clobber someone else's
+ * catalog" this guard exists to prevent.
+ *
+ * @param profileDir - the profile directory.
+ * @param ids - the ids being considered.
+ * @returns whether any of them would take a value away from the home layer.
+ */
+function catalogDrift(profileDir, ids) {
+  const home = readOptional(join(dirname(dirname(profileDir)), 'cordis.patch.yml'));
+  const own = readOptional(join(profileDir, 'cordis.patch.yml'));
+  for (const id of ids) {
+    const current = composedBody(id, own, home);
+    if (current !== undefined && current !== catalogBodyOf(id)) return true;
+  }
+  return false;
+}
+
+/**
+ * The catalog ids that must be added to a profile's own patch layer.
+ *
+ * Empty in the three cases where the profile already answers the question, which is
+ * the whole "idempotent and never clobber" behaviour:
+ *
+ * - the profile carries a `config` row for {@link CATALOG_SUBJECT} outside the managed
+ *   block: that is the person's (or the settings page's) catalog and is left alone;
+ * - the managed block exists: it is this layer's, and rewriting it would undo edits
+ *   the settings page made in place;
+ * - composing the home layer with the profile layer yields a value that is not this
+ *   deployment's: an operator replaced the managed home block, and a profile row
+ *   would silently win over it.
+ *
+ * @param profileDir - the profile directory.
+ * @returns the ids to write, in {@link MODEL_CATALOG_ROWS} order.
+ */
+export function missingCatalogRows(profileDir) {
+  const text = readOptional(join(profileDir, 'cordis.patch.yml'));
+  if (text.includes(CATALOG_BEGIN)) return [];
+  const own = rowsOutsideCatalog(text);
+  /*
+   * The row the page actually renders is `llm-pi-ai`. A profile that already names it
+   * has an owner for the catalog, so the whole file is left byte-identical: appending
+   * only `agent-default-model` would edit the person's document without fixing anything
+   * the page shows.
+   */
+  if (own.get(CATALOG_SUBJECT) !== undefined) return [];
+  const ids = MODEL_CATALOG_ROWS
+    .filter((row) => own.get(row.id) === undefined)
+    .map((row) => row.id);
+  if (ids.length === 0 || catalogDrift(profileDir, ids)) return [];
+  return ids;
+}
+
+/**
+ * Give a profile's own patch layer the deployment catalog the settings page reads.
+ *
+ * Byte-preserving outside the managed block, and a no-op when
+ * {@link missingCatalogRows} is empty — so a rerun writes nothing, a catalog the person
+ * already has is never overwritten, and rows the page edited in place inside the block
+ * stay as the page left them. What keeps such an in-place edit from being undone is that
+ * {@link missingCatalogRows} returns empty as soon as `CATALOG_BEGIN` is present: this
+ * function only ever writes into a file whose block is absent.
+ *
+ * @param profileDir - the profile directory.
+ * @returns the ids written; empty when the profile needed nothing.
+ */
+export function ensureProfileCatalog(profileDir) {
+  const ids = missingCatalogRows(profileDir);
+  if (ids.length === 0) return [];
+  const path = join(profileDir, 'cordis.patch.yml');
+  writeFileSync(path, replaceCatalogBlock(readOptional(path), catalogBlockText(ids)), 'utf8');
+  return ids;
+}
+
+/**
+ * Remove the managed catalog block from a profile patch, leaving everything else.
+ * @param profileDir - the profile directory.
+ * @returns whether a block was present.
+ */
+export function removeProfileCatalog(profileDir) {
+  const path = join(profileDir, 'cordis.patch.yml');
+  if (!existsSync(path)) return false;
+  const text = readFileSync(path, 'utf8');
+  if (!text.includes(CATALOG_BEGIN)) return false;
+  const merged = replaceCatalogBlock(text, '');
+  if (merged.trim() === '') rmSync(path, { force: true });
+  else writeFileSync(path, merged, 'utf8');
+  return true;
+}
+
+/**
+ * Whether a patch file carries a YAML value of its own — a row, or any scalar other
+ * than an empty sequence.
+ *
+ * The profile template's `[]` is the one value that does not count: a flow sequence
+ * cannot share a document with the block sequence a row needs, so a file whose only
+ * value is `[]` is empty for this purpose and the marker is dropped when rows are
+ * appended.
+ */
+function hasYamlValue(text) {
+  return text.split('\n').some((line) => {
+    const trimmed = line.trim();
+    return trimmed !== '' && !trimmed.startsWith('#') && !/^\[\s*\]$/u.test(trimmed);
+  });
+}
+
+/** A file's text without its empty flow-sequence markers, so rows can follow its comments. */
+function withoutEmptySequence(text) {
+  return text.split('\n').filter((line) => !/^\s*\[\s*\]\s*$/u.test(line)).join('\n').trimEnd();
+}
+
+/**
+ * Replace the managed catalog block in a patch file, or append one when absent.
+ *
+ * Idempotent, and content-preserving outside the block: comments, operator rows and
+ * everything the settings page wrote keep their exact text and order, and the block is
+ * replaced in place rather than appended again. A begin marker with no end marker (a
+ * hand-edited or truncated file) is treated as running to the end, so a damaged block
+ * can never be duplicated.
+ *
+ * The profile patch `initProfile` creates is a comment header followed by `[]`
+ * (`packages/boot/app-boot/src/profile.ts:230-234`), and rows cannot follow a flow
+ * sequence in the same document — appending to it produces YAML the loader refuses
+ * (`end of the stream or a document separator is expected`). That empty sequence is
+ * dropped when the block goes in, and written back when a removal would otherwise
+ * leave a document with no value at all.
+ *
+ * @param existing - current file contents.
+ * @param block - rows to manage, or the empty string to remove the block.
+ * @returns the merged contents, ending with exactly one newline.
+ */
+export function replaceCatalogBlock(existing, block) {
+  const raw = String(existing ?? '');
+  const body = String(block ?? '').trimEnd();
+  const managed = body === '' ? '' : `${body}\n`;
+  const start = raw.indexOf(CATALOG_BEGIN);
+  if (start < 0 && managed === '') return raw;
+  const end = start < 0 ? -1 : raw.indexOf(CATALOG_END, start);
+  const before = withoutEmptySequence(start < 0 ? raw : raw.slice(0, start));
+  const after = withoutEmptySequence(end < 0 ? '' : raw.slice(end + CATALOG_END.length));
+  const parts = [before, managed.trim(), after].filter((part) => part !== '');
+  const merged = parts.join('\n\n');
+  if (!hasYamlValue(merged)) return merged === '' ? '[]\n' : `${merged}\n[]\n`;
+  return `${merged}\n`;
+}
+
+/**
  * The community plugin marketplace, installed from npm and selected by default.
  *
  * `dshmarket` (`github.com/dsh-market/dsh-market`) is the **插件市场** page: browse,
@@ -529,7 +887,7 @@ export function provisionProfile(home, profile, options = {}) {
     withMarketplace: options.withMarketplace !== false,
     specOf: (plugin) => pluginInstallSpec(plugin.name),
   });
-  if (options.write === false) return { profile, status: 'planned', ...plan };
+  if (options.write === false) return { profile, status: 'planned', ...plan, catalog: missingCatalogRows(profileDir) };
 
   /*
    * 0. Retire the packages a previous round shipped, **before** anything is written.
@@ -618,12 +976,23 @@ export function provisionProfile(home, profile, options = {}) {
     after.dsh = { ...after.dsh, profile: { ...after.dsh?.profile, bundles: [...selected, ...select] } };
     writeManifest(profileDir, after);
   }
+
+  /*
+   * 4. The model catalog the 设置 › 模型 page reads, into the profile's own patch layer.
+   *
+   * Last, and after every manifest write: the write is the one part that changes what the
+   * settings page shows rather than what boots (see {@link MODEL_CATALOG_ROWS}), and it is
+   * a no-op — no file touched at all — on every run after the first.
+   */
+  const catalog = ensureProfileCatalog(profileDir);
+
   return {
     profile,
     status: failures.length === 0 ? 'ok' : 'partial',
     installed: [...installed, ...added.map((entry) => entry.name)],
     refreshed,
     retired,
+    catalog,
     selected: select,
     failures,
   };
@@ -660,7 +1029,10 @@ export function unprovisionProfile(home, profile, options = {}) {
   manifest.dependencies = dependencies;
   manifest.dsh = { ...manifest.dsh, profile: { ...manifest.dsh?.profile, bundles } };
   writeManifest(profileDir, manifest);
-  return { profile, status: 'ok', removed };
+  // The catalog is ours too, and it is the one thing here that lives in the patch file
+  // rather than the manifest; only the block is taken back, never the rest of the file.
+  const catalog = removeProfileCatalog(profileDir);
+  return { profile, status: 'ok', removed, catalog };
 }
 
 /** Profile directories to provision, excluding the shared dependency tree. */
@@ -717,6 +1089,13 @@ function installedNote(installed) {
   return parts.length === 0 ? '' : `; ${parts.join('; ')}`;
 }
 
+/** One clause naming the model catalog the run wrote, when it wrote one. */
+function catalogNote(catalog) {
+  return (catalog ?? []).length === 0
+    ? ''
+    : `; configured the model catalog (${catalog.join(', ')}) in the profile patch`;
+}
+
 /**
  * One report line per profile, for both the standalone script and `install.mjs`.
  *
@@ -738,9 +1117,10 @@ export function describeReports(reports, dryRun = false) {
       const generate = (report.link ?? []).map((entry) => entry.name);
       const fetch = (report.add ?? []).map((entry) => entry.name);
       const what = [...generate, ...fetch].join(', ') || 'nothing';
-      return `[platform] ${report.profile}: ${state}; would install ${what}`;
+      return `[platform] ${report.profile}: ${state}; would install ${what}${catalogNote(report.catalog)}`;
     }
-    return `[platform] ${report.profile}: ${state}${installedNote(report.installed)}${failNote(report.failures, report.profile)}`;
+    return `[platform] ${report.profile}: ${state}${installedNote(report.installed)}`
+      + `${catalogNote(report.catalog)}${failNote(report.failures, report.profile)}`;
   });
 }
 

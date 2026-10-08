@@ -15,8 +15,8 @@
   en: 4e966e230e0a9b3e
   zh: 29bf43497495e7aa
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage:
-  en: f9a2d7b51d749559
-  zh: 7ac75cf13243b3f2
+  en: 54772bf187a7bd0d
+  zh: 82b14cc3ade44127
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/packaging-this-product-s-desktop-build:
   en: 149c857e5a9b5376
   zh: f43f5fddb25a3a1f
@@ -27,8 +27,8 @@
   en: 117f490a032fdca1
   zh: fa5ae77c5c4c599d
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages:
-  en: 9a2072a5fc356cb5
-  zh: fdfafdcd688c9f79
+  en: 617d96685534d844
+  zh: 54755d6689928ed8
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/one-row-three-sub-plugins-per-component-config:
   en: 2c0884df68da9498
   zh: 7a2f9e26ab0eb45b
@@ -51,8 +51,8 @@
   en: 60865de75d80d547
   zh: 09def396aabd1aac
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-port-and-the-secret-have-to-be-readable-dsharness-gateway:
-  en: d4040333da20f2aa
-  zh: 356720e5650e36dc
+  en: 105265b198065aaf
+  zh: e63c55cfb2ba1bba
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-account-page-s-two-links-must-be-rendered-by-this-product:
   en: 01eb685612e24b41
   zh: 8dd6e4f9c6657e9c
@@ -65,6 +65,9 @@
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-model-route-is-this-product-s-gateway-not-deepseek-s:
   en: 68f42d805dbea3c7
   zh: 8b0073d322f7adb6
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-settings-models-page-reads-its-catalog-from-the-profile-s-own-patch-layer:
+  en: 79b118285dc39ed5
+  zh: adc42e9aa3cf84e5
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-the-account-backed-model-route-is-switched-off:
   en: b9df192e3fe18670
   zh: d069f0a3d2de4fbf
@@ -78,8 +81,11 @@
   en: bb85d7ed6ea375ba
   zh: a9efd4265cb9ace1
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-component-status-panel-browser-half-dsharness-ui-js:
-  en: df264314942bfcd6
-  zh: 65b971a67e603186
+  en: 1daa5aca55ad2be8
+  zh: cd30a13d77a7d22a
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-component-status-panel-browser-half-dsharness-ui-js/two-copy-buttons-and-a-second-face-that-only-a-click-reaches:
+  en: 15a6aa1605515cc6
+  zh: 92398c89122e2be7
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-origin-the-client-is-built-with-must-reach-this-product-directly:
   en: b572b1b36828f4bc
   zh: f67447aba8b5f26b
