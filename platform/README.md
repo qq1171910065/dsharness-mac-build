@@ -27,31 +27,27 @@ This layer therefore edits no upstream file and uses three public mechanisms:
 
 1. the profile patch layer (`cordis.patch.yml`) overrides or disables rows by `id`;
 2. cordis plugin packages (`dsh.bundle.patch` for the Host half, `dsh.client` for the browser half) add capability;
-3. the machine-level host configuration (`$DSH_HOME/cordis.patch.yml`) applies overrides to every profile, including the application-owned `desktop` one — **config overrides only**; fork-owned plugins are provisioned as bundle packages instead, so the official Plugins page can switch them.
+3. the machine-level host configuration (`$DSH_HOME/cordis.patch.yml`) applies overrides to every profile, including the application-owned `desktop` one — **config overrides only**; the fork-owned plugin is provisioned as a bundle package instead, so the official Plugins page lists it as a real card.
 
 ## Layout
 
 ```text
 platform/
   cordis.patch.yml         deployment rows: login origin, model route, and the disabled row
-  install.mjs              write those rows, then provision the profile plugins
-  provision.mjs            install this product's plugins in the shape the Plugins page can switch
-  model-key.mjs            fork-owned plugin: fetch this account's gateway key into the credentials
-  update.mjs               fork-owned plugin: show the installed vs published version
-  update-ui.js             fork-owned browser half: the Settings row that opens the Desktop update dialog
-  update-ui.host.mjs       its no-op host half (a bundle row needs one; the browser half is a classic script)
-  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api,
-                           and the /dsharness/gateway page with the port and the secret
+  install.mjs              write those rows, then provision the profile plugin
+  provision.mjs            install this product's one bundle package and retire the four it replaced
+  dsharness.mjs            the product's own bundle, host half: the local gateway, the model-key
+                           delivery loop, the update check, and the /dsharness/status.json status face
+  dsharness-ui.js          its browser half: the read-only component panel on the bundle's own card,
+                           the Settings › General update row, and the status face's consumer
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
-  install.test.mjs         the deployment rows and their layer precedence
-  provision.test.mjs       the plugin provisioning policy
-  model-key.test.mjs       the key delivery plugin (20 cases)
-  update.test.mjs          version comparison and the update surface (12 cases)
-  update-ui.test.mjs       the in-app update row: the evaluated bundle, its registration, degradation
-  host-auth.test.mjs       the gateway plugin's pure functions and its pages
-  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity
+  install.test.mjs         the deployment rows and their layer precedence (14 cases)
+  provision.test.mjs       the plugin provisioning policy and the retired-package migration (26 cases)
+  dsharness.test.mjs       the merged bundle's host components and the status face (73 cases)
+  dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel (16 cases)
+  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (23 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
@@ -97,7 +93,7 @@ node platform/install.mjs
 DSH_PLATFORM_ORIGIN=https://www.czmanong.com node platform/install.mjs
 ```
 
-The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugins this product ships into every profile it finds (see the plugins section below). `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated packages, our dependency entries and our selections.
+The script merges instead of overwriting, because the official plugin manager records user toggles in that same file, and it then provisions the plugin this product ships into every profile it finds (see the plugins section below). `--no-marketplace` leaves the community marketplace alone; `--check` reports what would change without writing; `--remove` takes back the managed rows, our generated package, our dependency entry and our selection.
 
 `DSHARNESS_SKIP_INSTALL=1` makes `dev-all.ps1` pass `--no-marketplace`, because that switch already means "do not use the network here".
 
@@ -155,12 +151,19 @@ login, balance and account service without running a script first.
 runtime the application itself ships, so no system Node, npm or pnpm is needed. It also copies
 `platform/windows/app-update.yml` into `<install>\resources`, which is what the packaged
 updater looks for — see the update section below. The payload
-is generated by `build-deploy-payload.mjs`: `home.mjs`, `provision.mjs`, `install.mjs` and
-`host-auth.mjs` are byte-identical copies of the files above, and `cordis.patch.yml` is the
+is generated by `build-deploy-payload.mjs`: `home.mjs`, `provision.mjs`, `install.mjs`,
+`dsharness.mjs` and `dsharness-ui.js` are byte-identical copies of the files above, and
+`cordis.patch.yml` is the
 same rows with **one line rewritten** — `platformOrigin` is baked to the origin this build
 targets, because an installed machine has no `DSH_PLATFORM_ORIGIN` and the loader refuses to
 let any `.env` supply a `DSH_`-prefixed name (`packages/boot/app-boot/src/index.ts:157`).
-`deploy-payload.test.mjs` fails when a copy drifts.
+Both halves of the merged bundle are in that list because `provision.mjs` reads `plugin.entry`
+and `plugin.clientEntry` relative to its own directory: a payload that carried only one would
+fail to place the package. `buildDeployPayload` also **deletes payload files this round no
+longer ships**, because NSIS embeds the directory wholesale (`File` per module), so a leftover
+copy is not inert — it ships. Without that pruning the four replaced plugin sources stayed in
+`windows/deploy/` and kept being embedded. `deploy-payload.test.mjs` fails when a copy drifts
+or a stale file remains.
 
 ```
 node platform/build-deploy-payload.mjs                        # write, default origin
@@ -220,16 +223,15 @@ A row's `name` resolves relative to the patch file that declares it, so a layer 
 
 That was verified by booting the `web` profile with a home-level patch that inserted such a row and observing the plugin's side effect (`loaded:dsharness-platform-probe`). It means fork-owned capability needs neither an upstream package nor a published npm name.
 
-It is **not** how this product ships its plugins, though — such a row belongs to no
+It is **not** how this product ships its plugin, though — such a row belongs to no
 package, so the official Plugins page cannot list or switch it. See the next
-section: fork-owned plugins go in as bundle packages, and only config overrides of
+section: the fork-owned plugin goes in as a bundle package, and only config overrides of
 rows upstream already declares stay in the home-level patch.
 
 ### Plugins this product ships are real bundle packages
 
-The product decision is two-sided: the gateway plugin is a **custom plugin, off by
-default**, and the community marketplace (`dshmarket`) is **on by default**. Both
-are decided by packaging, not by anything a patch row can say.
+The product ships exactly one bundle package, `dsharness`, and it is **on by default and not
+switchable**. Both facts are decided by packaging, not by anything a patch row can say.
 
 The official Plugins page (`packages/client/ui-plugin-manager`) lists **packages**
 (`pluginManager/listBundles`) and splits them with two package flags:
@@ -240,9 +242,9 @@ The official Plugins page (`packages/client/ui-plugin-manager`) lists **packages
 | Official | `optional && !installed` |
 
 A row inserted straight from a patch file belongs to no package, so the page never
-mentions it. Measured on the live desktop Host: the row *was* addressable by
-`listPlugins` (`patchId: dsharness-host-auth`) while `listBundles` knew nothing
-about it — there was no card to switch, which is exactly what the request is about.
+mentions it. Measured on the live desktop Host before the merge: such a row *was*
+addressable by `listPlugins` (`patchId: dsharness-host-auth`) while `listBundles` knew
+nothing about it — there was no card to switch, which is exactly what the request is about.
 `optional` is not deployment-settable either; it comes from the launcher's own
 `OPTIONAL_BUNDLES` allowlist.
 
@@ -253,27 +255,43 @@ What *is* deployment-actionable, and all `provision.mjs` writes, is the pair:
 - **`enabled`** — membership in `dsh.profile.bundles`. A bundle listed there runs;
   one that is merely installed does not.
 
-So *off by default* is **installed but not selected**, and *on by default* is
-**installed and selected**. Both are then switchable in the page through the
-official `setBundleEnabled`, with no mechanism of ours in the loop.
+So *on by default* is **installed and selected**. The community marketplace (`dshmarket`)
+is provisioned the same way and stays switchable in the page; this product's own bundle is
+the one that is not.
 
-Measured on the live desktop Host after `node platform/install.mjs`:
+Measured on the live desktop Host with a real `boot()` and the real `PluginManager` after
+`node platform/install.mjs`:
 
 ```text
-dsharness-host-auth  installed=true   enabled=false  title{zh: "DSH Desktop 网关"}   rows=[dsharness-host-auth]
-dshmarket            installed=true   enabled=true   title{zh: "插件市场"}          rows=[dsh-market]
+enabled: true   installed: true   removable: false   readOnlyReason: 'management-required'
+rows: [dsharness]        overrides: []
 ```
 
-`--dump-config` agrees: with the selection list as written, the composed tree has
-`dsh-market` and **no** `dsharness-host-auth` row. Turning ours on through the
-official switch (`pluginManager/setBundleEnabled`) then makes the shared-secret
-channel answer 200 for the right secret while wrong/absent secrets stay 401 —
-`check-host-auth.mjs` covers that against the live Host.
+`--dump-config` composes that package's row exactly as the package's own patch declares it.
+The channel itself answers 200 for the correct secret while wrong or absent secrets stay
+401 — `check-host-auth.mjs` covers that against the live Host.
+
+#### One row, three sub-plugins, per-component config
+
+`apply()` mounts the three host components as Cordis sub-plugins —
+`ctx.plugin(gatewayComponent, config.gateway)` and the two siblings — so the Loader holds one
+row (`id: dsharness`) and the page shows one card; the fourth component, the status panel,
+is drawn inside that same card by the browser half and adds no row of its own. The generated
+patch carries one config section per component:
+
+```yaml
+gateway:  { token: !!js process.env.DSH_AUTH_TOKEN ?? '', cookieName: dsharness_auth, loginPage: true }
+modelKey: {}
+update: {}
+```
+
+A missing section means that component's own defaults, so any section may be left out. Only
+`gateway` has a real deployment-time input (the secret); the other two are empty today.
 
 #### No default state is ever written into a patch layer
 
-The tempting alternative — keep inserting the row from `$DSH_HOME/cordis.patch.yml`
-and write `disabled: true` — is a dead end, and worth recording because it looks
+The tempting alternative — insert our own row from a patch file and write
+`disabled: true` somewhere — is a dead end, and worth recording because it looks
 right. `readProfilePatches` (`packages/boot/app-boot/src/profile-context.ts:63`)
 applies *bundle layers → profile patch → `$DSH_HOME` patch → overlays*, and a later
 layer overwrites an earlier one per row id. Measured with the real
@@ -289,7 +307,60 @@ A default written into our managed block is therefore the last word and the page
 switch could never turn the plugin on. Letting the package own its row removes the
 question: `platform/cordis.patch.yml` now carries a comment-only explanation where
 that `insert` used to be, and `install.test.mjs` asserts no fork-owned insert and no
-`disabled:` remain there.
+`disabled:` remain there. What keeps that package's row from being switched off is a
+separate row inside the package's own patch, explained next.
+
+#### The shipped bundle cannot be switched off or uninstalled
+
+The user asked for one plugin with several components that **cannot be closed**, and the
+whole mechanism is one extra row in the bundle's generated patch — the same patch that
+inserts the product row:
+
+```yaml
+- insert:
+    - id: dsharness
+      name: ./index.mjs
+    - name: '@deepseek-ai/dsh-plugin-manager'
+      disabled: true
+```
+
+`PluginManager.protectsManager(name)` (`packages/boot/plugin-manager/src/index.ts:763-773`)
+is true when **any row a bundle's patch inserts** names a module in that file's
+`protectedModules` (`:66-76`), and `@deepseek-ai/dsh-plugin-manager` is one of them. Both
+mutations fail, measured on a real `boot()` with the real `PluginManager`:
+
+```text
+setBundleEnabled('dsharness', false) → application: 'failed', changed: false, error: { code: 'management-required' }
+removeBundle('dsharness')            → application: 'failed', changed: false, error: { code: 'not-removable' }
+```
+
+Two details make the shield row invisible and free:
+
+- **It carries no `id`.** `declaredRows` (`:647+`) collects only rows whose `id` is a string,
+  so it never reaches the card's row list — the person sees one row, not two.
+- **`disabled: true`.** The Loader returns **before** `import()` for a disabled row
+  (`vendor/loader/src/config/entry.ts:136-139`), so the module name is never resolved and no
+  dependency is added.
+
+The second half of the predicate, `` `include:${row.id}` === this.ownerEntryId ``, is dead
+code: `ownerEntryId` (`:207`) is the literal `'include'`, so no row id can produce that
+string. The whole protection rests on the module-name half.
+
+#### A profile provisioned before the merge retires the replaced packages
+
+An older build provisioned four separate bundles — `dsharness-model-key`, `dsharness-update`,
+`dsharness-update-ui` and `dsharness-host-auth` — so such a profile still names them in the
+manifest's `dependencies` and in `dsh.profile.bundles`, and still has their directories under
+`node_modules`. Left behind, they would keep running: their rows would mount a second gateway,
+a second model-key delivery loop and a **second** update surface — the duplication the merge
+exists to remove.
+
+`provision.mjs` retires them explicitly and idempotently. `REPLACED_PLUGINS` is the list;
+`planProvisioning(...).retired` and `provisionProfile(...).retired` report it. Retirement
+removes the dependency entry, removes the selection, and deletes the directory **before**
+placing the replacement — the dependency entry because a manifest that does not declare a
+package lets pnpm prune it on the next run, so deleting only the directory would not hold.
+This is the one documented exception to "selection only ever grows".
 
 #### One asymmetry worth knowing
 
@@ -298,33 +369,31 @@ package is a real directory **inside** `<profile>/node_modules` declared as
 `file:./node_modules/<name>` (`pluginInstallSpec`). It also needs no symlink
 privilege, which on Windows would otherwise mean Developer Mode.
 
-Our own packages are placed directly and need no package manager at all, so the
-gateway plugin works on a machine that has never reached npm; only `dshmarket`
-goes through pnpm. A failed marketplace install is reported with the exact manual
-command and never fails the deployment.
+Our own package is placed directly and needs no package manager at all, so the bundle
+works on a machine that has never reached npm; only `dshmarket` goes through pnpm. A failed
+marketplace install is reported with the exact manual command and never fails the deployment.
 
-#### Turning it off in a live process does not revoke issued cookies
+#### A connection cookie already issued outlives the wrap
 
-Measured: after enabling and then disabling through `setBundleEnabled`,
-`listBundles` says `enabled: false` and `pluginInventory/list` no longer lists the
-row — yet a request carrying the correct secret **still gets 200** (absent and
-wrong secrets still 401, so it is not a vacuous pass). The cleanup restores the
-`connection` method references, but the connection cookie already exchanged
-remains a valid short-lived credential: upstream does not re-ask who minted it on
-each request. Nothing here can fix that without touching upstream's `connection`,
-and it does not affect the default state, which was never enabled. To invalidate
-immediately, change `DSH_AUTH_TOKEN` and restart — those cookies are signed with
-the connection secret.
+Measured while the bundle was still switchable: after `setBundleEnabled` disabled it,
+`listBundles` said `enabled: false` and `pluginInventory/list` no longer listed the row — yet
+a request carrying the correct secret **still got 200** (absent and wrong secrets still 401,
+so it is not a vacuous pass). The cleanup restores the `connection` method references, and
+the connection cookie already exchanged remains a valid short-lived credential: upstream does
+not re-ask who minted it on each request. Nothing here can fix that without touching
+upstream's `connection`. The page can no longer reach that state for this bundle, and the
+default has always been enabled; to invalidate an issued cookie immediately, change
+`DSH_AUTH_TOKEN` and restart — those cookies are signed with the connection secret.
 
-### Server-to-server access to the official `/api` (`host-auth.mjs`)
+### Server-to-server access to the official `/api` (gateway component of `dsharness.mjs`)
 
 The official `/api` authenticates with a cookie that only a browser holding the launch token `dsh web` printed can obtain (`packages/client/connection/src/browser-auth.ts`). A caller with **no browser** — another product's server, a script, a mini program backend — cannot get one, and should not have to drive a browser to try.
 
-`host-auth.mjs` adds a second credential that lands in the same place: a correct shared secret (`Authorization: Bearer <secret>`, or the cookie this plugin issues) is converted into a one-request connection cookie and appended to the request. The official checks still run; they just see a request that already satisfies them.
+The gateway component of `dsharness.mjs` adds a second credential that lands in the same place: a correct shared secret (`Authorization: Bearer <secret>`, or the cookie this component issues) is converted into a one-request connection cookie and appended to the request. The official checks still run; they just see a request that already satisfies them.
 
 | caller | how it gets in |
 |--------|----------------|
-| no credential | 401 from the official connection layer — this plugin does not open anything by itself |
+| no credential | 401 from the official connection layer — this component does not open anything by itself |
 | wrong or short secret | 401, same as above |
 | `Authorization: Bearer <secret>` | admitted; covers unary RPC **and** the `/api/remote.mux` upgrade |
 | browser on the LAN | `/dsharness/auth` exchanges the secret for a cookie, then `/` and `/api` both work |
@@ -334,8 +403,8 @@ The official `/api` authenticates with a cookie that only a browser holding the 
 
 "I cannot integrate with it" was the report, and the reason was structural: the port and the
 shared secret existed only inside the process. `dsh web` prints `?token=` once, at startup,
-into a terminal — and the desktop application has no terminal at all. So `host-auth.mjs`
-renders both:
+into a terminal — and the desktop application has no terminal at all. So the gateway
+component renders both:
 
 | surface | what it gives |
 |---------|---------------|
@@ -361,15 +430,15 @@ value goes into the credential layer under `DSHARNESS_AUTH_TOKEN`, which makes i
 across restarts — a secret that changed every launch would be a secret the user could never
 copy down. `enabled: false` is the one way to turn the channel off.
 
-Both surfaces are registered as `kind: 'exact'` routes and additionally allowed through
+These surfaces are registered as `kind: 'exact'` routes and additionally allowed through
 `authorizeIndex`: `webServer.match()` checks the exact table first, but `frontend-static`
 delegates index requests to `authorizeIndex`, which accepts only `GET /` — so without that
 allowance these pages would be reachable only if route registration happened to win the race.
 
 
-It wraps `connection.requestRejection` and `connection.authorizeIndex` instead of registering a route, because `/api` is already claimed: `webServer.register` throws on a duplicate `(kind, path)`, and the upgrade path is registered separately by `api-gateway`. Both admission decisions funnel through those two service methods, so one wrap covers every carrier.
+The gateway component wraps `connection.requestRejection` and `connection.authorizeIndex` instead of registering a route, because `/api` is already claimed: `webServer.register` throws on a duplicate `(kind, path)`, and the upgrade path is registered separately by `api-gateway`. Both admission decisions funnel through those two service methods, so one wrap covers every carrier.
 
-It is **not a second authentication stack**: the Host/Origin fence and the connection-cookie check still decide, no new trust principal appears, and the comparison is `timingSafeEqual`. The plugin is zero-dependency `.mjs` (only `node:` imports) because this layer has no `node_modules`: it reads config as a plain object and writes the connection key literal (`client-connection/browser-session`, the value `credentialKey(scope, id)` produces).
+It is **not a second authentication stack**: the Host/Origin fence and the connection-cookie check still decide, no new trust principal appears, and the comparison is `timingSafeEqual`. The whole bundle is zero-dependency `.mjs` (only `node:` imports) because this layer has no `node_modules`: each component reads config as a plain object and the gateway writes the connection key literal (`client-connection/browser-session`, the value `credentialKey(scope, id)` produces).
 
 On startup it self-checks by minting a cookie and running it through the official `requestRejection`; a format drift upstream warns immediately instead of surfacing as a 401 in production. `check-host-auth.mjs` covers the whole thing against a running profile:
 
@@ -433,7 +502,7 @@ Four things that cost time and are worth knowing before writing against this sur
 
 `cordis.patch.yml` addresses four rows that upstream already declares. A patch replaces a
 row's whole `config`, so an override restates every key that row owns. No fork-owned plugin
-is inserted here — those ship as bundle packages instead, for the reason given above.
+is inserted here — it ships as a bundle package instead, for the reason given above.
 
 | row | upstream default | this deployment |
 |-----|------------------|-----------------|
@@ -496,20 +565,21 @@ sending any request (`.../deepseek-account-platform/src/index.ts:167-176`) — v
 Host log as `stored grant discarded`. Diagnosing a report of "thrown back to login" means
 checking which of the three it was, not assuming this one.
 
-### The delivery step the key needs (`model-key.mjs`)
+### The delivery step the key needs (model-key component of `dsharness.mjs`)
 
 The product server has always returned the per-user gateway key at
 `GET /api/account/model-access`, and nothing in this fork ever read it: a search for
 `model-access`, `apiKeyCreated` and `dshModelKey` across `client/` was zero hits. So the route
 above had no credential and every request failed with `MISSING_CREDENTIAL`.
 
-`platform/model-key.mjs` is that consumer. On the account session's changes it asks the
+The model-key component of `dsharness.mjs` is that consumer. On the account session's changes
+it asks the
 product server for the key and writes it into the credential store under
 `DSHARNESS_MODEL_KEY` — the reference `llm-pi-ai`'s `apiKeyEnv` names — and removes it on
 sign-out or an unauthorized answer. A transport failure keeps the stored key, because a `503`
 says nothing about whether the gateway key is still valid.
 
-### Check for updates (`update.mjs`)
+### Check for updates (update component of `dsharness.mjs`)
 
 The official updater needs `app-update.yml` next to the application resources, and an unsigned
 build never gets one: `publish: null` (`apps/desktop/scripts/electron-builder-config.mjs:249`)
@@ -521,7 +591,8 @@ while `publisherName` is absent (`electron-updater/out/NsisUpdater.js:84-100`). 
 deliberately not in the file; adding it starts a real Authenticode check and every update would
 fail with `ERR_UPDATER_INVALID_SIGNATURE`.
 
-So `platform/update.mjs` serves the answer itself at `/dsharness/update` (HTML) and
+The update component of `dsharness.mjs` serves the answer itself at `/dsharness/update` (HTML)
+and
 `/dsharness/update.json`, comparing the installed version against the release the product
 server publishes at `GET /api/config/version`. It reports; it does not download or install.
 
@@ -536,7 +607,7 @@ user actually installed.
 now writes both: the website advertised `0.2.1-alpha.1.20261007.2` while `/api/config/version`
 still answered `0.2.0`, so a freshly installed client was told it was current.
 
-### The in-app update entry (`update-ui.js`)
+### The in-app update entry (browser half `dsharness-ui.js`)
 
 The updater above answers "which version is this"; it is not a place a user goes. The shell
 already exposes the real in-app update UI — `dshDesktop.updates.open()`
@@ -551,21 +622,24 @@ That is why this layer has to be a plugin rather than an upstream edit: `setting
 is a documented extension point (declared in
 `packages/client/ui-settings/src/client/contract/slots.ts:92`) and a registrant needs one
 `slots.register`, while the fork's rule is that nothing under `packages/` or `apps/` is
-touched. `update-ui.js` therefore contributes one row to Settings › General, ordered 90
+touched. `dsharness-ui.js` therefore contributes one row to Settings › General, ordered 90
 (between `developer-tools` and `current-version`), whose button calls
 `globalThis.dshDesktop?.updates?.open()` and whose status line renders the subscribed
-`status()` phase in words.
+`status()` phase in words. It is the **same** update component the panel shows; there is no
+second update plugin and no duplicated copy.
 
-Three details are deliberate, and each is asserted by `update-ui.test.mjs`:
+Three details are deliberate, and each is asserted by `dsharness-ui.test.mjs`:
 
-- **The bundle is a classic script, so the plugin is two files.** The client module system
+- **The browser half is a classic script, so the bundle is two files.** The client module system
   loads bundles with `document.createElement('script')`
   (`packages/client/modules/src/client/system.ts:16-29`) and reconciles the registration `id`
-  against the package name, so `update-ui.js` may only register itself through
-  `window.__ModuleLoader__.load(...)`; it cannot be an ESM plugin. Node, meanwhile, imports a
-  bundle row's `index.mjs`. `update-ui.host.mjs` is that no-op host half, and
-  `provision.mjs`'s `clientEntry` field copies the browser half into the package as
-  `client.js` — a package needs both to be a bundle row **and** a served browser bundle.
+  against the package name — so `dsharness-ui.js` may only register itself through
+  `window.__ModuleLoader__.load(...)` and cannot be an ESM plugin, while Node imports the bundle
+  row's ESM entry. The host half is therefore a **real plugin**, `dsharness.mjs`, which mounts
+  the three host components as sub-plugins; `provision.mjs`'s `clientEntry` field copies the
+  browser half into the package as
+  `client.js` — a package needs both to be a bundle row **and** a served browser bundle. The
+  registration `id` must equal the package name (`dsharness`) byte for byte.
 - **The row needs no context.** Owner props on `settings.general.item` are empty, and
   `dsh-client-locale` is not one of the nine baseline modules a client bundle may `require`
   (`packages/client/web/src/platform.ts`), so the copy is built-in and picks zh/en from
@@ -597,6 +671,55 @@ preserved by `sanitizeFileName`), which the build records verbatim as
 `builder-debug.yml`. A mismatch breaks nothing visibly; it silently leaks the download on
 uninstall, which is why `deploy-payload.test.mjs` asserts the name. The quotes are required:
 YAML treats a leading `@` as a reserved indicator.
+
+### The component status panel (browser half `dsharness-ui.js`)
+
+Two decisions came from the user here:
+
+> 可以把…这些插件合并成码农 DSH 插件，其中包了多个组件。该插件虽然是已安装的自定义插件，但是是不可以关闭的
+> 应该都是不能改的…插件的组件中只是显示组件状态，而不需要显示key的信息
+
+The first is why there is one bundle with four components instead of four packages; the second
+is why the panel is display-only. Merging also removed the duplicate: the "check for updates"
+Settings row and the panel's update row are now the same update component, not two plugins.
+
+The panel is the `plugins.bundle.config` slot on the bundle's **own card** in the Plugins page
+(registered by `key`, which must equal the package name `dsharness`), so the component state is
+visible without adding a card or a Loader row. It draws four rows:
+
+| component | state it shows | facts it shows |
+|-----------|----------------|----------------|
+| 本机网关 (local gateway) | running / off | listening port, local address, whether the shared secret is configured |
+| 模型 Key (model key) | synced / not synced / signed out | the credential reference name (`DSHARNESS_MODEL_KEY`) and whether it holds a value |
+| 检查更新 (update check) | up to date / a version is available / not checked yet / check failed | current version, latest version, the live phase, and the button that opens the Desktop update dialog |
+| 账号与费用 (account & billing) | signed in / signed out | the user's name (or a masked contact), and the balance per wallet |
+
+The data comes from `GET /dsharness/status.json`, the read-only face the gateway component
+registers. Its fields are exactly:
+
+```text
+{ok, port, address, tokenConfigured, cookieName, loginPath, gatewayPath,
+ version:{current,latest,updateAvailable},
+ modelKey:{ref,configured},
+ account:{signedIn,name,contact,balance:[{currency,balance}]},
+ checkedAt}
+```
+
+Two properties are deliberate:
+
+- **It carries no credential.** `tokenConfigured` and `modelKey.configured` are booleans,
+  never values; there is no field holding the shared secret or the model key. The only
+  surfaces that show the shared secret remain `/dsharness/gateway` and
+  `/dsharness/gateway.json`, and they stay loopback-only alongside this one.
+- **It is loopback-only and read-only.** A non-loopback request gets `403`; a non-`GET` gets
+  `405`. Nothing in the panel is writable: no input, no switch, no config form — the panel
+  renders the status slot and returns a one-line summary for any other view. The version
+  section has a 60 s TTL cache and shares its origin with the update component, so the panel
+  and the update page cannot disagree about the latest release.
+
+The browser half polls the face once at mount and then every 10 s, and degrades to "status is
+unavailable right now" on a 403, a timeout, or a malformed body — the other rows still render,
+and it never throws.
 
 ### The origin the client is built with must reach this product directly
 

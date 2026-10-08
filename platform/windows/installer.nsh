@@ -54,11 +54,8 @@ Function .onInstSuccess
   File "${__FILEDIR__}\deploy\home.mjs"
   File "${__FILEDIR__}\deploy\provision.mjs"
   File "${__FILEDIR__}\deploy\install.mjs"
-  File "${__FILEDIR__}\deploy\host-auth.mjs"
-  File "${__FILEDIR__}\deploy\model-key.mjs"
-  File "${__FILEDIR__}\deploy\update.mjs"
-  File "${__FILEDIR__}\deploy\update-ui.host.mjs"
-  File "${__FILEDIR__}\deploy\update-ui.js"
+  File "${__FILEDIR__}\deploy\dsharness.mjs"
+  File "${__FILEDIR__}\deploy\dsharness-ui.js"
   File "${__FILEDIR__}\deploy\cordis.patch.yml"
 
   ; The update feed descriptor, beside the application's resources.

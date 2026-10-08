@@ -6,53 +6,53 @@ import { join } from 'node:path';
 import {
   MARKETPLACE_PACKAGE,
   PROFILE_PLUGINS,
+  REPLACED_PLUGINS,
   planProvisioning,
   pluginInstallSpec,
   provisionAll,
   provisionProfile,
+  unprovisionProfile,
   writePluginPackage,
 } from './provision.mjs';
 
 /**
  * The plugin provisioning contract.
  *
- * Two product asks these tests guard:
+ * Three product asks these tests guard:
  *
  * > 我希望把这个插件作为一个自定义插件，默认不启用。
  * > 还有插件市场这个插件，默认启用
+ * > 可以把 dshdesktop 网关、模型 key、检查更新、应用内检查更新这些插件合并成
+ * > 码农 DSH 插件，其中包了多个组件。该插件虽然是已安装的自定义插件，但是是不可以关闭的
  *
- * …plus the delivery plugin, which is the opposite default on purpose: without
- * its key written into the credential store the product's model route has no
- * credential at all, so it must start switched on.
- *
- * Both halves are decided by *packaging*, and both are easy to get subtly wrong
- * in ways that only show up as "the page has no card" or "the switch does
- * nothing". So the assertions here are about the two flags the Plugins page
- * derives its groups from -- `installed` (a manifest dependency) and `enabled`
- * (a `dsh.profile.bundles` selection) -- plus the file and row shape the Loader
- * needs.
+ * The first two are decided by *packaging*: the Plugins page groups cards by
+ * `installed` (a manifest dependency) and `enabled` (a `dsh.profile.bundles`
+ * selection). The third is decided by the bundle's own patch, which carries the shield
+ * row that makes the card read-only. All three are easy to get subtly wrong in ways that
+ * only show up as "the page has no card", "the switch does nothing" or "the switch works
+ * when it must not", so the assertions below are about exactly those facts.
  *
  * Everything runs against a temporary harness home: the real profile is never
  * touched, and no pnpm runs (the runner is injected).
  */
 
-/** The model-key delivery plugin: installed AND selected. */
-const MODEL_KEY = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-model-key');
-
-/** The check-for-updates plugin; installed and selected (nothing to switch off). */
-const UPDATE = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-update');
-
-/** The gateway plugin: installed but NOT selected. */
-const GATEWAY = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-host-auth');
-
-/** The settings row that opens the Desktop update dialog: installed and selected. */
-const UPDATE_UI = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness-update-ui');
+/** The one plugin this product generates locally. */
+const OWN = PROFILE_PLUGINS.find((plugin) => plugin.name === 'dsharness');
 
 /** Every plugin this product generates locally, in shipped order. */
-const OWN_PLUGINS = [MODEL_KEY, UPDATE, UPDATE_UI, GATEWAY];
+const OWN_PLUGINS = [OWN];
 
 /** The plugins that start switched on. */
-const SELECTED_PLUGINS = [MODEL_KEY, UPDATE, UPDATE_UI];
+const SELECTED_PLUGINS = [OWN];
+
+/** A host-only plugin, to prove the generator still handles a bundle with no browser half. */
+const HOST_ONLY = {
+  name: 'plain-plugin',
+  entry: 'install.mjs',
+  rowId: 'plain-plugin',
+  title: 'plain',
+  description: 'plain',
+};
 
 const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`, 'utf8');
 
@@ -83,34 +83,68 @@ function fakeRunner(profileDir, calls) {
   };
 }
 
-test('planProvisioning: only the marketplace, the key plugin and the updater are selected', () => {
+test('PROFILE_PLUGINS: this product ships exactly one bundle, and it is on by default', () => {
+  assert.deepEqual(PROFILE_PLUGINS.map((plugin) => plugin.name), ['dsharness']);
+  assert.equal(OWN.defaultEnabled, true);
+  // The card's title is the product's own name, not the package name.
+  assert.equal(OWN.zhTitle, '码农 DSH');
+  // Host half and browser half are two files of ONE package: a classic script cannot be
+  // the Loader entry, and an ESM plugin cannot be a browser script.
+  assert.notEqual(OWN.entry, OWN.clientEntry);
+  assert.equal(OWN.rowId, OWN.name, 'the row id is the package name, which is also the client bundle id');
+});
+
+test('REPLACED_PLUGINS: the four bundles this round merged away are named', () => {
+  // A profile provisioned by an earlier build still lists these. Without the list they
+  // would keep running beside their replacement: a second gateway, a second key delivery
+  // loop and a second update surface.
+  assert.deepEqual([...REPLACED_PLUGINS].sort(), [
+    'dsharness-host-auth', 'dsharness-model-key', 'dsharness-update', 'dsharness-update-ui',
+  ]);
+  for (const name of REPLACED_PLUGINS) {
+    assert.ok(!PROFILE_PLUGINS.some((plugin) => plugin.name === name), `${name} must not still be shipped`);
+  }
+});
+
+test('planProvisioning: only the bundle and the marketplace are obtained, and both are selected', () => {
   const plan = planProvisioning({ dependencies: {}, dsh: { profile: { bundles: [] } } });
   assert.deepEqual(
     plan.install.map((entry) => entry.name),
     [...OWN_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE],
   );
-  // The gateway plugin is installed but NOT selected (默认不启用); the other three
-  // must be selected: a model route whose credential is never delivered fails every
-  // request, a check-for-updates page nobody can reach is not a feature, and a
-  // settings entry nobody switched on is invisible in the UI.
+  // The bundle must start selected: a model route whose credential is never delivered
+  // fails every request, and a status panel nobody switched on is invisible in the UI.
   assert.deepEqual(plan.select, [...SELECTED_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE]);
+  assert.deepEqual(plan.retired, []);
 });
 
-test('planProvisioning: our own plugins need no package manager, the marketplace does', () => {
+test('planProvisioning: our own plugin needs no package manager, the marketplace does', () => {
   const plan = planProvisioning({ dependencies: {}, dsh: { profile: { bundles: [] } } });
-  // Split matters: our packages are generated locally, so a machine that has never
-  // reached npm still gets a working gateway plugin and a working model credential.
+  // Split matters: our package is generated locally, so a machine that has never reached
+  // npm still gets a working gateway, a working credential and a working update entry.
   assert.deepEqual(plan.link.map((entry) => entry.name), OWN_PLUGINS.map((plugin) => plugin.name));
   assert.deepEqual(plan.add.map((entry) => entry.name), [MARKETPLACE_PACKAGE]);
   // A file: spec inside the profile — see pluginInstallSpec for why not link:.
-  assert.equal(plan.link[0].spec, pluginInstallSpec(MODEL_KEY.name));
+  assert.equal(plan.link[0].spec, pluginInstallSpec(OWN.name));
   // A registry package installs by name; only ours carry a path spec.
   assert.equal(plan.add[0].spec, MARKETPLACE_PACKAGE);
 });
 
+test('planProvisioning: a profile from an earlier build lists the four old bundles as retired', () => {
+  const plan = planProvisioning({
+    dependencies: Object.fromEntries(REPLACED_PLUGINS.map((name) => [name, `file:./node_modules/${name}`])),
+    dsh: { profile: { bundles: [...REPLACED_PLUGINS, 'dshmarket'] } },
+  });
+  assert.deepEqual(plan.retired, REPLACED_PLUGINS);
+  // Retiring is not "uninstalling and reinstalling": the replacement is still new here,
+  // and the marketplace this manifest never had is still obtained.
+  assert.deepEqual(plan.install.map((entry) => entry.name), ['dsharness', MARKETPLACE_PACKAGE]);
+  assert.deepEqual(plan.select, ['dsharness']);
+});
+
 test('pluginInstallSpec: a file spec inside the profile, never link: or an absolute path', () => {
-  const spec = pluginInstallSpec('dsharness-host-auth');
-  assert.equal(spec, 'file:./node_modules/dsharness-host-auth');
+  const spec = pluginInstallSpec('dsharness');
+  assert.equal(spec, 'file:./node_modules/dsharness');
   // Relative to the profile, and pointing at the profile's own tree: a link: to a
   // directory outside the profile is what pnpm prunes on the next install.
   assert.ok(!spec.startsWith('link:'));
@@ -118,19 +152,21 @@ test('pluginInstallSpec: a file spec inside the profile, never link: or an absol
 });
 
 test('planProvisioning: selection is only ever added, never removed', () => {
-  // A selection the person made in the page must survive every rerun.
+  // A selection the person made in the page must survive every rerun; a bundle they
+  // switched off must stay off.
   const plan = planProvisioning({
     dependencies: {
       ...Object.fromEntries(OWN_PLUGINS.map((plugin) => [plugin.name, 'link:../../x'])),
       [MARKETPLACE_PACKAGE]: '^1',
     },
-    dsh: { profile: { bundles: [GATEWAY.name] } },
+    dsh: { profile: { bundles: ['some-bundle-the-person-switched-on'] } },
   });
   assert.deepEqual(plan.install, [], 'everything is already installed');
   assert.deepEqual(plan.select, [
     ...SELECTED_PLUGINS.map((plugin) => plugin.name),
     MARKETPLACE_PACKAGE,
   ], 'only the not-yet-selected ones are added');
+  assert.deepEqual(plan.retired, [], 'nothing this round shipped is ever retired');
 });
 
 test('planProvisioning: already selected means nothing to install and nothing to select', () => {
@@ -154,51 +190,79 @@ test('planProvisioning: --no-marketplace leaves the marketplace entirely alone',
   assert.deepEqual(plan.select, SELECTED_PLUGINS.map((plugin) => plugin.name));
 });
 
-test('writePluginPackage: the package declares a bundle patch and a relative row name', () => {
+test('writePluginPackage: the package declares a bundle patch, a relative row and the shield', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
-    const dir = writePluginPackage(join(root, 'pkg'), GATEWAY);
+    const dir = writePluginPackage(join(root, 'pkg'), OWN);
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    assert.equal(manifest.name, GATEWAY.name);
+    assert.equal(manifest.name, OWN.name);
     // `listBundles` reads `dsh.bundle.patch`; without it the package is not a bundle.
     assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
     const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
     // The row name resolves relative to THIS file (`anchorInsertedPluginNames`),
     // which is what lets the package move between profiles.
-    assert.match(patch, /^ {4}- id: dsharness-host-auth$/m);
+    assert.match(patch, /^ {4}- id: dsharness$/m);
     assert.match(patch, /^ {6}name: \.\/index\.mjs$/m);
     /*
-     * No `disabled` in the package's own row. A default written into a bundle
-     * layer would be applied before the profile layer, so the page's switch could
-     * override it — but it would also be wrong the other way round: the default
-     * belongs to the selection (`dsh.profile.bundles`), not to the row.
+     * The product row itself states no default state: the default belongs to the
+     * selection (`dsh.profile.bundles`). The only `disabled:` in the file is the shield,
+     * which is the mechanism that makes this bundle unclosable — see the next test.
+     * (Counted as a YAML key, so the explanatory comment above it does not match.)
      */
-    assert.ok(!/disabled:/u.test(patch), 'the bundle row must not state a default state');
+    assert.equal((patch.match(/^\s+disabled:/gmu) ?? []).length, 1);
     // The entry is a copy, so the package is self-contained.
     assert.ok(existsSync(join(dir, 'index.mjs')));
-    assert.equal(readFileSync(join(dir, 'index.mjs'), 'utf8'), readFileSync(join(import.meta.dirname, GATEWAY.entry), 'utf8'));
+    assert.equal(readFileSync(join(dir, 'index.mjs'), 'utf8'), readFileSync(join(import.meta.dirname, OWN.entry), 'utf8'));
     // Card text comes from `locale/<lang>.json`; without it the card is the package name.
     const en = JSON.parse(readFileSync(join(dir, 'locale', 'en.json'), 'utf8'));
     const zh = JSON.parse(readFileSync(join(dir, 'locale', 'zh.json'), 'utf8'));
     assert.equal(typeof en.meta.title, 'string');
-    assert.equal(typeof zh.meta.title, 'string');
+    assert.equal(zh.meta.title, '码农 DSH');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('writePluginPackage: a plugin with no config block gets a row without one', () => {
+test('writePluginPackage: the shield row is id-less and disabled, so it cannot show or load', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
-    // The key plugin needs no config: every value it uses comes from the account
-    // session, so emitting an empty `config:` would be noise the Loader still accepts.
-    const dir = writePluginPackage(join(root, 'pkg'), MODEL_KEY);
+    const dir = writePluginPackage(join(root, 'pkg'), OWN);
     const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
-    assert.match(patch, /^ {4}- id: dsharness-model-key$/m);
-    assert.ok(!/^ {6}config:$/m.test(patch), 'a plugin with no config must not emit an empty config key');
-    // The gateway plugin still carries its own.
-    const gateway = writePluginPackage(join(root, 'gateway'), GATEWAY);
-    assert.match(readFileSync(join(gateway, 'cordis.patch.yml'), 'utf8'), /^ {6}config:$/m);
+    /*
+     * The shield is the whole "cannot be switched off" mechanism: `protectsManager`
+     * (`packages/boot/plugin-manager/src/index.ts:763-773`) is true when any inserted row
+     * names a `protectedModules` entry, and `@deepseek-ai/dsh-plugin-manager` is one.
+     *
+     * Two properties matter and both are asserted as literal text, because either one
+     * silently breaking turns the shield into a visible phantom row (`declaredRows` lists
+     * any inserted row with a string id) or into a real module dependency (a row that is
+     * not disabled gets imported, and this name would then have to resolve).
+     */
+    assert.match(patch, /^ {4}- name: '@deepseek-ai\/dsh-plugin-manager'$/m, 'the shield names a protected module');
+    assert.match(patch, /^ {4}- name: '@deepseek-ai\/dsh-plugin-manager'\n {6}disabled: true$/m, 'and is disabled');
+    // Exactly one id per bundle: the product row. An id on the shield would surface it.
+    assert.equal((patch.match(/^ {4}- id: /gmu) ?? []).length, 1);
+    assert.equal((patch.match(/- id: /gu) ?? []).length, 1);
+    // One `insert:` list, so both rows land in the same layer and the same reload pass.
+    assert.equal((patch.match(/^- insert:$/gmu) ?? []).length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('writePluginPackage: the product row carries per-component config, keyed by component', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
+  try {
+    const dir = writePluginPackage(join(root, 'pkg'), OWN);
+    const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    // One row, three config sections: the merged host half reads `{gateway, modelKey, update}`.
+    assert.match(patch, /^ {6}config:$/m);
+    assert.match(patch, /^ {8}gateway:$/m);
+    assert.match(patch, /^ {8}modelKey: \{\}$/m);
+    assert.match(patch, /^ {8}update: \{\}$/m);
+    // The secret comes from the environment and is never written into the repo.
+    assert.match(patch, /^ {10}token: !!js process\.env\.DSH_AUTH_TOKEN \?\? ''$/m);
+    assert.ok(!/token:\s*['"]?[A-Za-z0-9_-]{16,}/.test(patch), 'no literal secret may appear in the generated patch');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -207,7 +271,7 @@ test('writePluginPackage: a plugin with no config block gets a row without one',
 test('writePluginPackage: a browser half is declared with the two fields the roster reads', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
-    const dir = writePluginPackage(join(root, 'pkg'), UPDATE_UI);
+    const dir = writePluginPackage(join(root, 'pkg'), OWN);
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     // `platform: 'web'` is the activation-scan filter; a misspelled subkey is not a
     // warning anywhere (`parseDshClient` only ever reads `platform`), so the bundle
@@ -221,24 +285,25 @@ test('writePluginPackage: a browser half is declared with the two fields the ros
     assert.ok(existsSync(clientPath), './client must point at the packaged bundle');
     assert.equal(
       readFileSync(clientPath, 'utf8'),
-      readFileSync(join(import.meta.dirname, UPDATE_UI.clientEntry), 'utf8'),
+      readFileSync(join(import.meta.dirname, OWN.clientEntry), 'utf8'),
     );
     // The module loader reconciles the registration `id` against the package name
     // and drops the bundle when they disagree, so the literal is compared here.
     const bundle = readFileSync(clientPath, 'utf8');
     const id = /id:\s*'([^']+)'/.exec(bundle)?.[1];
-    assert.equal(id, UPDATE_UI.name);
+    assert.equal(id, OWN.name);
     // The classic-script bundle must not be the Loader entry: Node imports
     // `index.mjs`, and a browser script cannot also be an ESM plugin.
-    assert.notEqual(UPDATE_UI.entry, UPDATE_UI.clientEntry);
     assert.equal(manifest.main, './index.mjs');
     assert.ok(!readFileSync(join(dir, 'index.mjs'), 'utf8').includes('__ModuleLoader__'));
-    // The generated manifest is read back on machines with a non-UTF-8 console and
-    // travel inside the NSIS payload; keeping the description ASCII avoids a
-    // mojibake'd card title that nothing would report as an error.
+    // The generated manifest travels inside the NSIS payload and is read back on machines
+    // with a non-UTF-8 console; ASCII keeps a mojibake'd card title from going unnoticed.
     const written = readFileSync(join(dir, 'package.json'), 'utf8');
     assert.ok(!written.includes('\\u'), 'JSON.stringify must not leave escape sequences behind');
     assert.equal(Buffer.from(written, 'utf8').filter((byte) => byte > 0x7f).length, 0);
+    // The English locale text is the manifest description, so it is ASCII for the same reason.
+    assert.equal(Buffer.from(readFileSync(join(dir, 'locale', 'en.json'), 'utf8'), 'utf8')
+      .filter((byte) => byte > 0x7f).length, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -247,17 +312,17 @@ test('writePluginPackage: a browser half is declared with the two fields the ros
 test('writePluginPackage: a host-only plugin gains no client fields', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
-    // The three plugins that predate the browser half must stay exactly as they
-    // were: no `dsh.client`, no `./client` export, no `client.js` in the package.
-    for (const plugin of [MODEL_KEY, UPDATE, GATEWAY]) {
-      const dir = writePluginPackage(join(root, plugin.name), plugin);
-      const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-      assert.equal('client' in manifest.dsh, false, `${plugin.name} declares no browser half`);
-      assert.equal('./client' in manifest.exports, false);
-      assert.deepEqual(Object.keys(manifest.exports), ['..', './cordis.patch.yml', './locale/*.json', './package.json']
-        .map((key) => (key === '..' ? '.' : key)));
-      assert.equal(existsSync(join(dir, 'client.js')), false);
-    }
+    // The generator must stay general: a bundle with no browser half gets no `dsh.client`,
+    // no `./client` export and no `client.js`, and its patch carries no config block.
+    const dir = writePluginPackage(join(root, 'plain'), HOST_ONLY);
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    assert.equal('client' in manifest.dsh, false);
+    assert.equal('./client' in manifest.exports, false);
+    assert.equal(existsSync(join(dir, 'client.js')), false);
+    const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+    assert.ok(!/^ {6}config:$/m.test(patch), 'a plugin with no config must not emit an empty config key');
+    // The shield is unconditional: every generated bundle is unclosable, not just this one.
+    assert.match(patch, /^ {4}- name: '@deepseek-ai\/dsh-plugin-manager'$/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -277,14 +342,14 @@ test('provisionProfile: dry run writes no plugin package and runs no package man
   }
 });
 
-test('provisionProfile: installs every shipped plugin, selects the marketplace and the on-by-default ones', () => {
+test('provisionProfile: installs the bundle, selects it and the marketplace', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
     const dir = makeProfile(root, 'desktop');
     const calls = [];
     const report = provisionProfile(root, 'desktop', { run: fakeRunner(dir, calls) });
     assert.equal(report.status, 'ok');
-    // One package-manager run, for the marketplace only: our packages are generated.
+    // One package-manager run, for the marketplace only: our package is generated.
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].slice(1, -1), [MARKETPLACE_PACKAGE]);
     assert.deepEqual(
@@ -292,30 +357,77 @@ test('provisionProfile: installs every shipped plugin, selects the marketplace a
       [...OWN_PLUGINS.map((plugin) => plugin.name), MARKETPLACE_PACKAGE].sort(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    // `installed` for all of them: this is what makes the Plugins page show cards at all.
+    // `installed` is what makes the Plugins page show a card at all.
     for (const plugin of OWN_PLUGINS) assert.ok(Object.hasOwn(manifest.dependencies, plugin.name));
     assert.ok(Object.hasOwn(manifest.dependencies, MARKETPLACE_PACKAGE));
-    // Our dependencies point at the package inside the profile, as file: specs.
+    // Our dependency points at the package inside the profile, as a file: spec.
     for (const plugin of OWN_PLUGINS) {
       assert.equal(manifest.dependencies[plugin.name], pluginInstallSpec(plugin.name));
     }
-    // `enabled` follows each plugin's `defaultEnabled`, never the gateway's.
+    // `enabled` follows `defaultEnabled`.
     assert.deepEqual(manifest.dsh.profile.bundles.filter((name) => name === MARKETPLACE_PACKAGE), [MARKETPLACE_PACKAGE]);
     for (const plugin of SELECTED_PLUGINS) {
       assert.deepEqual(manifest.dsh.profile.bundles.filter((name) => name === plugin.name), [plugin.name]);
     }
-    assert.ok(!manifest.dsh.profile.bundles.includes(GATEWAY.name));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('provisionProfile: the marketplace failure does not stop our plugins being installed', () => {
+test('provisionProfile: a profile from an earlier build loses the four merged-away bundles', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
     const dir = makeProfile(root, 'desktop');
-    // Offline: pnpm fails, but the gateway plugin must still land — it is what the
-    // mini-program talks to, and it does not need the network at all.
+    // Exactly what an older build left behind: four generated packages, both flags set.
+    const stale = { ...JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) };
+    stale.dependencies = Object.fromEntries(REPLACED_PLUGINS.map((name) => [name, `file:./node_modules/${name}`]));
+    stale.dsh.profile.bundles = ['@deepseek-ai/dsh-base', ...REPLACED_PLUGINS, 'dshmarket'];
+    writeJson(join(dir, 'package.json'), stale);
+    for (const name of REPLACED_PLUGINS) {
+      mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+      writeJson(join(dir, 'node_modules', name, 'package.json'), { name });
+    }
+    const report = provisionProfile(root, 'desktop', { run: fakeRunner(dir, []) });
+    assert.deepEqual(report.retired, REPLACED_PLUGINS);
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    for (const name of REPLACED_PLUGINS) {
+      // Both flags, because either one alone is broken: a dependency without a selection
+      // is fine but the four directories would sit there as cards, and a selection without
+      // a dependency is a skipped bundle the Loader reports on every boot.
+      assert.ok(!Object.hasOwn(manifest.dependencies, name), `${name} must lose its dependency`);
+      assert.ok(!manifest.dsh.profile.bundles.includes(name), `${name} must lose its selection`);
+      assert.equal(existsSync(join(dir, 'node_modules', name)), false, `${name} must lose its directory`);
+    }
+    // The replacement arrived in the same run, so the profile never boots without it.
+    assert.ok(Object.hasOwn(manifest.dependencies, OWN.name));
+    assert.ok(manifest.dsh.profile.bundles.includes(OWN.name));
+    // A package the person installed themselves is not touched.
+    assert.ok(manifest.dsh.profile.bundles.includes('dshmarket'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('provisionProfile: retiring is idempotent across reruns', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    const first = readFileSync(join(dir, 'package.json'), 'utf8');
+    const second = provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
+    assert.deepEqual(second.retired, [], 'nothing left to retire');
+    assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), first, 'a rerun must change nothing');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('provisionProfile: the marketplace failure does not stop our plugin being installed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    // Offline: pnpm fails, but the bundle must still land — the model key and the gateway
+    // are what make the product usable at all, and neither needs the network to install.
     const report = provisionProfile(root, 'desktop', { run: () => ({ status: 1, output: 'ERR_PNPM no network' }) });
     assert.equal(report.status, 'partial');
     assert.deepEqual(report.installed, OWN_PLUGINS.map((plugin) => plugin.name));
@@ -364,20 +476,20 @@ test('provisionProfile: an already-installed plugin is refreshed, not left stale
   const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
   try {
     const dir = makeProfile(root, 'desktop');
-    const packageDir = join(dir, 'node_modules', GATEWAY.name);
+    const packageDir = join(dir, 'node_modules', OWN.name);
     provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
     // Simulate an installed copy that drifted from the source (an edited plugin).
     writeFileSync(join(packageDir, 'index.mjs'), '// stale copy\n', 'utf8');
     const report = provisionProfile(root, 'desktop', { withMarketplace: false, run: () => ({ status: 0, output: '' }) });
     /*
-     * The installed entry is a COPY, so it must be rewritten on every run: the
-     * first version refreshed only when the dependency was missing, and a plugin
-     * edit was then silently ignored on any machine already provisioned.
+     * The installed entry is a COPY, so it must be rewritten on every run: the first
+     * version refreshed only when the dependency was missing, and a plugin edit was then
+     * silently ignored on any machine already provisioned.
      */
     assert.deepEqual(report.refreshed, OWN_PLUGINS.map((plugin) => plugin.name));
     assert.equal(
       readFileSync(join(packageDir, 'index.mjs'), 'utf8'),
-      readFileSync(join(import.meta.dirname, GATEWAY.entry), 'utf8'),
+      readFileSync(join(import.meta.dirname, OWN.entry), 'utf8'),
     );
     // A refresh is not a new install: nothing to report as "installed".
     assert.deepEqual(report.installed, []);
@@ -392,6 +504,39 @@ test('provisionProfile: a profile that was never initialized is skipped, not cre
     const report = provisionProfile(root, 'desktop');
     assert.equal(report.status, 'skipped');
     assert.equal(existsSync(join(root, 'profiles', 'desktop')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('unprovisionProfile: takes back this round and everything it replaced', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsharness-provision-'));
+  try {
+    const dir = makeProfile(root, 'desktop');
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    manifest.dependencies = {
+      [OWN.name]: pluginInstallSpec(OWN.name),
+      ...Object.fromEntries(REPLACED_PLUGINS.map((name) => [name, `file:./node_modules/${name}`])),
+      // Not ours: a package the person installed themselves stays.
+      keepme: '^1',
+    };
+    manifest.dsh.profile.bundles = ['@deepseek-ai/dsh-base', OWN.name, ...REPLACED_PLUGINS, 'dshmarket'];
+    writeJson(join(dir, 'package.json'), manifest);
+    for (const name of [OWN.name, ...REPLACED_PLUGINS]) {
+      mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+    }
+    const report = unprovisionProfile(root, 'desktop');
+    assert.deepEqual([...report.removed].sort(), [OWN.name, ...REPLACED_PLUGINS].sort());
+    const after = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    assert.equal(Object.hasOwn(after.dependencies, 'keepme'), true, 'a package we do not own stays');
+    for (const name of [OWN.name, ...REPLACED_PLUGINS]) {
+      assert.ok(!Object.hasOwn(after.dependencies, name));
+      assert.ok(!after.dsh.profile.bundles.includes(name));
+      assert.equal(existsSync(join(dir, 'node_modules', name)), false);
+    }
+    // The marketplace loses its selection (documented) but never its installation.
+    assert.equal(Object.hasOwn(after.dependencies, 'dshmarket'), false, 'the test never installed it as a dependency');
+    assert.ok(!after.dsh.profile.bundles.includes('dshmarket'), 'its selection is taken back');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -421,6 +566,8 @@ test('provisionAll: writes the generated package into the profile it belongs to'
      */
     for (const plugin of OWN_PLUGINS) {
       assert.ok(existsSync(join(dir, 'node_modules', plugin.name, 'package.json')));
+      // The browser half lands beside it, which is what the client roster serves.
+      assert.ok(existsSync(join(dir, 'node_modules', plugin.name, 'client.js')));
     }
     // No second copy elsewhere in the harness home.
     assert.deepEqual(readdirSync(root).filter((name) => name !== 'profiles'), []);

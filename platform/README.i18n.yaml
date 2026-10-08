@@ -6,8 +6,8 @@
   en: 90921a995c5a0489
   zh: b8cfb47109afcd0e
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/why-not-patch-package-patches:
-  en: 6570575cb22e670b
-  zh: f6cb8dd93748a7cc
+  en: a8f551c3997f61f3
+  zh: a99f55401a45d077
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/layout:
   en: 1ab8b509e0fe148b
   zh: e7ed18deb4d03ba4
@@ -15,35 +15,44 @@
   en: 4e966e230e0a9b3e
   zh: 29bf43497495e7aa
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage:
-  en: 79bf51fe511c3304
+  en: f9a2d7b51d749559
   zh: 7ac75cf13243b3f2
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/packaging-this-product-s-desktop-build:
   en: 149c857e5a9b5376
   zh: f43f5fddb25a3a1f
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-installer-already-carries-the-deployment-layer:
-  en: 0bf847426a3b0709
-  zh: 018a3815cc3150f0
+  en: e7a6c4550581c4e8
+  zh: 9069b25d7fcbb8ea
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/rows-here-can-mount-fork-owned-code:
-  en: 3f3e7710c4f73ea0
+  en: 117f490a032fdca1
   zh: fa5ae77c5c4c599d
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages:
-  en: 718c72685f43741f
-  zh: 5ceac1941cc8ba3e
+  en: 9a2072a5fc356cb5
+  zh: fdfafdcd688c9f79
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/one-row-three-sub-plugins-per-component-config:
+  en: 2c0884df68da9498
+  zh: 7a2f9e26ab0eb45b
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/no-default-state-is-ever-written-into-a-patch-layer:
-  en: e46716230c23dfff
-  zh: 3a128413358e57d2
+  en: 055fa35288d7bfdd
+  zh: adc69f66f4d681e2
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/the-shipped-bundle-cannot-be-switched-off-or-uninstalled:
+  en: f267646b39fe3a96
+  zh: 2af2711321be1c12
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/a-profile-provisioned-before-the-merge-retires-the-replaced-packages:
+  en: 918ce27b10f39289
+  zh: f424c06c7e7e500d
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/one-asymmetry-worth-knowing:
-  en: 8ce617094c658562
-  zh: ddb3fc3913c0eb46
-/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/turning-it-off-in-a-live-process-does-not-revoke-issued-cookies:
-  en: ec450807b5a908c4
-  zh: 95a4a12b0e8f3580
-/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/server-to-server-access-to-the-official-api-host-auth-mjs:
-  en: c30be2d195d19046
-  zh: 1f3b621085f20333
+  en: 0b70271dd6de3d19
+  zh: f8cbcead9844327d
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/plugins-this-product-ships-are-real-bundle-packages/a-connection-cookie-already-issued-outlives-the-wrap:
+  en: 6e443ce84905d59c
+  zh: e994a2d6ac07d0ef
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/server-to-server-access-to-the-official-api-gateway-component-of-dsharness-mjs:
+  en: 60865de75d80d547
+  zh: 09def396aabd1aac
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-port-and-the-secret-have-to-be-readable-dsharness-gateway:
-  en: 9677490013de7158
-  zh: b69400f4bad7f4af
+  en: d4040333da20f2aa
+  zh: 356720e5650e36dc
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/usage/the-account-page-s-two-links-must-be-rendered-by-this-product:
   en: 01eb685612e24b41
   zh: 8dd6e4f9c6657e9c
@@ -51,23 +60,26 @@
   en: cd0b6a4eefc91fb3
   zh: 9645620ef58b84a0
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes:
-  en: 5400f91085575828
-  zh: 42669351e95c0515
+  en: c90bfba73597f47b
+  zh: e8ae68ef1d6246f0
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-model-route-is-this-product-s-gateway-not-deepseek-s:
   en: 68f42d805dbea3c7
   zh: 8b0073d322f7adb6
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/why-the-account-backed-model-route-is-switched-off:
   en: b9df192e3fe18670
   zh: d069f0a3d2de4fbf
-/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-delivery-step-the-key-needs-model-key-mjs:
-  en: a886cae4d5e7895b
-  zh: ad23ce125e314e87
-/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/check-for-updates-update-mjs:
-  en: 8379b29f7a2e9e2b
-  zh: b9352fc85be3e2c5
-/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-in-app-update-entry-update-ui-js:
-  en: 27444bed67b40925
-  zh: a2c1afefc5e8d4a4
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-delivery-step-the-key-needs-model-key-component-of-dsharness-mjs:
+  en: 4aad8316df35de47
+  zh: 9b72d387b88f151e
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/check-for-updates-update-component-of-dsharness-mjs:
+  en: 73cf8eb150a0cf86
+  zh: 33fb07a3a66c0a1b
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-in-app-update-entry-browser-half-dsharness-ui-js:
+  en: bb85d7ed6ea375ba
+  zh: a9efd4265cb9ace1
+/dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-component-status-panel-browser-half-dsharness-ui-js:
+  en: df264314942bfcd6
+  zh: 65b971a67e603186
 /dsharness-deployment-layer-fork-owned-no-upstream-counterpart/what-it-changes/the-origin-the-client-is-built-with-must-reach-this-product-directly:
   en: b572b1b36828f4bc
   zh: f67447aba8b5f26b

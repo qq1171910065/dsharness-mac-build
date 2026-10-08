@@ -27,31 +27,27 @@ git merge upstream/master      # never conflicts in platform/
 
 1. profile 补丁层（`cordis.patch.yml`）按 `id` 覆盖或停用某一行；
 2. cordis 插件包（Host 半边用 `dsh.bundle.patch`，浏览器半边用 `dsh.client`）增加能力；
-3. 机器级 host 配置（`$DSH_HOME/cordis.patch.yml`）对**每个** profile 生效，包括应用自己拥有的 `desktop` —— 但**只放配置覆盖**；自有插件改成组合包（下一节），这样官方插件页才能开关它。
+3. 机器级 host 配置（`$DSH_HOME/cordis.patch.yml`）对**每个** profile 生效，包括应用自己拥有的 `desktop` —— 但**只放配置覆盖**；自有插件改成组合包（下一节），这样官方插件页上它是一张真正的卡片。
 
 ## 目录
 
 ```text
 platform/
   cordis.patch.yml         deployment rows: login origin, model route, and the disabled row
-  install.mjs              write those rows, then provision the profile plugins
-  provision.mjs            install this product's plugins in the shape the Plugins page can switch
-  model-key.mjs            fork-owned plugin: fetch this account's gateway key into the credentials
-  update.mjs               fork-owned plugin: show the installed vs published version
-  update-ui.js             fork-owned browser half: the Settings row that opens the Desktop update dialog
-  update-ui.host.mjs       its no-op host half (a bundle row needs one; the browser half is a classic script)
-  host-auth.mjs            fork-owned plugin: shared-secret access to the official /api,
-                           and the /dsharness/gateway page with the port and the secret
+  install.mjs              write those rows, then provision the profile plugin
+  provision.mjs            install this product's one bundle package and retire the four it replaced
+  dsharness.mjs            the product's own bundle, host half: the local gateway, the model-key
+                           delivery loop, the update check, and the /dsharness/status.json status face
+  dsharness-ui.js          its browser half: the read-only component panel on the bundle's own card,
+                           the Settings › General update row, and the status face's consumer
   home.mjs                 the $DSH_HOME resolution both scripts share
   build-deploy-payload.mjs assemble windows/deploy from the files above
   package-windows.mjs      build this product's installer through the upstream packager
-  install.test.mjs         the deployment rows and their layer precedence
-  provision.test.mjs       the plugin provisioning policy
-  model-key.test.mjs       the key delivery plugin (20 cases)
-  update.test.mjs          version comparison and the update surface (12 cases)
-  update-ui.test.mjs       the in-app update row: the evaluated bundle, its registration, degradation
-  host-auth.test.mjs       the gateway plugin's pure functions and its pages
-  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity
+  install.test.mjs         the deployment rows and their layer precedence (14 cases)
+  provision.test.mjs       the plugin provisioning policy and the retired-package migration (26 cases)
+  dsharness.test.mjs       the merged bundle's host components and the status face (73 cases)
+  dsharness-ui.test.mjs    the browser half: the evaluated bundle, its two registrations, the panel (16 cases)
+  deploy-payload.test.mjs  the installer seam: payload, include, version record, profile parity (23 cases)
   check-host-auth.mjs      live check against a running profile (unary, cookie, index, WebSocket)
   check-desktop.mjs        live check against the real Electron renderer (CDP)
   check-pages.mjs          live check of /top_up and /usage the way the embedded view opens them
@@ -143,10 +139,14 @@ node platform/package-windows.mjs --check          # print the plan without buil
 `deploy-entry.mjs` —— 不需要系统 Node、npm 或 pnpm。它同时把
 `platform/windows/app-update.yml` 拷进 `<install>\resources`，那正是打包后的 updater 要找的位置
 （见下面的更新一节）。载荷由 `build-deploy-payload.mjs` 生成：
-`home.mjs` / `provision.mjs` / `install.mjs` / `host-auth.mjs` 与上层文件**逐字节相同**，
+`home.mjs` / `provision.mjs` / `install.mjs` / `dsharness.mjs` / `dsharness-ui.js` 与上层文件**逐字节相同**，
 `cordis.patch.yml` 是同一份行、**只改写一行** —— `platformOrigin` 烧成本次构建的地址，因为装好
 的机器上没有 `DSH_PLATFORM_ORIGIN`，而加载器拒绝任何 `.env` 提供 `DSH_` 前缀的名字
-（`packages/boot/app-boot/src/index.ts:157`）。副本一漂移，`deploy-payload.test.mjs` 就报红。
+（`packages/boot/app-boot/src/index.ts:157`）。合并后的两个半边都在清单里，因为 `provision.mjs` 是
+按自己所在目录解析 `plugin.entry` / `plugin.clientEntry` 的：只带一个半边的载荷放不出这个包。
+`buildDeployPayload` 还会**删掉本轮不再投放的载荷文件** —— NSIS 是整目录嵌入（每个模块一条 `File`），
+所以留下一个旧副本不是无害的，它会随包发货。没有这一步清理，被替换掉的四个插件源文件会一直留在
+`windows/deploy/` 里并被继续嵌入。副本一漂移或残留旧文件，`deploy-payload.test.mjs` 就报红。
 
 ```
 node platform/build-deploy-payload.mjs                        # write, default origin
@@ -203,7 +203,7 @@ node platform/windows/verify-installer.mjs --output "$env:TEMP\seam"
 
 ### 自有插件是真正的组合包
 
-产品口径是两面：网关插件是**自定义插件、默认不启用**，社区插件市场（`dshmarket`）**默认启用**。两者都由**打包形态**决定，而不是由某条 patch 行说什么决定。
+本产品只发**一个**组合包 `dsharness`，而且它**默认启用、不可开关**。两条都由**打包形态**决定，而不是由某条 patch 行说什么决定。
 
 官方插件页（`packages/client/ui-plugin-manager`）列的是**包**（`pluginManager/listBundles`），并按两个包级标志分组：
 
@@ -212,27 +212,39 @@ node platform/windows/verify-installer.mjs --output "$env:TEMP\seam"
 | 已安装 | `installed \|\| !optional` |
 | 官方 | `optional && !installed` |
 
-一行从 patch 文件直接插进去的行不属于任何包，页面就不会提它。真机桌面 Host 上实测：那一行**能被 `listPlugins` 定位**（`patchId: dsharness-host-auth`），而 `listBundles` 完全不知道它 —— 页面上**没有卡片可切**，而这正是需求本身。`optional` 也不是部署能设的，它来自启动器自己的 `OPTIONAL_BUNDLES` 白名单。
+一行从 patch 文件直接插进去的行不属于任何包，页面就不会提它。合并之前的真机桌面 Host 上实测：那一行**能被 `listPlugins` 定位**（`patchId: dsharness-host-auth`），而 `listBundles` 完全不知道它 —— 页面上**没有卡片可切**，而这正是需求本身。`optional` 也不是部署能设的，它来自启动器自己的 `OPTIONAL_BUNDLES` 白名单。
 
 真正可由部署决定、也是 `provision.mjs` 唯一在写的，是这一对：
 
 - **`installed`** —— profile 的 `node_modules` 里有一个真的组合包，并写进 profile manifest 的 `dependencies`；
 - **`enabled`** —— `dsh.profile.bundles` 里有没有它。列在那里才会加载；只是装了不算。
 
-于是**默认不启用**＝**装了但没选中**，**默认启用**＝**装了且选中**。两者之后都能在插件页里用官方 `setBundleEnabled` 切换，中间没有我们自己的机制。
+于是**默认启用**＝**装了且选中**。社区插件市场（`dshmarket`）也这样 provision，并且在插件页里仍可开关；不可开关的是本产品自带的这一个包。
 
-`node platform/install.mjs` 之后在真机桌面 Host 上实测：
+`node platform/install.mjs` 之后，用真 `boot()` + 真 `PluginManager` 在真机桌面 Host 上实测：
 
 ```text
-dsharness-host-auth  installed=true   enabled=false  title{zh: "DSH Desktop 网关"}   rows=[dsharness-host-auth]
-dshmarket            installed=true   enabled=true   title{zh: "插件市场"}          rows=[dsh-market]
+enabled: true   installed: true   removable: false   readOnlyReason: 'management-required'
+rows: [dsharness]        overrides: []
 ```
 
-`--dump-config` 也一致：按写下的选中列表组合出来的树里有 `dsh-market`，**没有** `dsharness-host-auth`。经官方开关（`pluginManager/setBundleEnabled`）把我们那个打开之后，共享密钥通道对正确密钥回 200，而错密钥/无密钥仍是 401 —— `check-host-auth.mjs` 对真机 Host 覆盖了这一段。
+`--dump-config` 组合出来的行与那个包自己的 patch 声明完全一致。通道本身对正确密钥回 200，错密钥/无密钥仍是 401 —— `check-host-auth.mjs` 对真机 Host 覆盖了这一段。
+
+#### 一行、三个子插件、分段配置
+
+`apply()` 把三个宿主组件用 `ctx.plugin(gatewayComponent, config.gateway)` 及其两个兄弟挂成 Cordis **子插件**，所以 Loader 里只有一行（`id: dsharness`）、插件页上只有一张卡；第四个组件（状态面板）由浏览器半边画在同一张卡片里，不额外占一行。生成的 patch 里每个组件一段配置：
+
+```yaml
+gateway:  { token: !!js process.env.DSH_AUTH_TOKEN ?? '', cookieName: dsharness_auth, loginPage: true }
+modelKey: {}
+update: {}
+```
+
+缺段就是各组件自己的默认值，所以任何一段都可以不写。只有 `gateway` 有真正的部署期输入（密钥），另外两段今天都是空的。
 
 #### 默认态绝不写进任何 patch 层
 
-看起来更省事的另一条路 —— 继续从 `$DSH_HOME/cordis.patch.yml` 插入那一行，再在某处写 `disabled: true` —— 是死路，而且值得记下来，因为它看起来是对的。`readProfilePatches`（`packages/boot/app-boot/src/profile-context.ts:63`）的层序是 *bundle 层 → profile 层 → `$DSH_HOME` 层 → overlay*，后应用的层按行 id 覆盖前面的。用真的 `applyEntryPatches` 实测：
+看起来更省事的另一条路 —— 从 patch 文件插入我们自己的行，再在某处写 `disabled: true` —— 是死路，而且值得记下来，因为它看起来是对的。`readProfilePatches`（`packages/boot/app-boot/src/profile-context.ts:63`）的层序是 *bundle 层 → profile 层 → `$DSH_HOME` 层 → overlay*，后应用的层按行 id 覆盖前面的。用真的 `applyEntryPatches` 实测：
 
 ```text
 [profile(disabled=false), home(insert + disabled=true)] → disabled=true
@@ -240,27 +252,59 @@ dshmarket            installed=true   enabled=true   title{zh: "插件市场"}  
 [home(insert, neutral),   profile(disabled=false)]      → disabled=false
 ```
 
-即：写进我们受管块的默认态会成为最后一句话，插件页的开关**永远打不开**。让包自己拥有那一行就把这个问题整个消掉：`platform/cordis.patch.yml` 现在只在原处留一段说明，而 `install.test.mjs` 断言那里不再有任何自有 insert、也没有任何 `disabled:`。
+即：写进我们受管块的默认态会成为最后一句话，插件页的开关**永远打不开**。让包自己拥有那一行就把这个问题整个消掉：`platform/cordis.patch.yml` 现在只在原处留一段说明，而 `install.test.mjs` 断言那里不再有任何自有 insert、也没有任何 `disabled:`。让这个包的这一行**关不掉**的是它自己 patch 里的另一行，下一节说。
+
+#### 本产品这个组合包不能关闭、也不能卸载
+
+用户要求的是一个插件包多个组件、并且**不可以关闭**，整个机制就是该包生成的 patch 里多插一行 —— 与插入产品行的是同一份 patch：
+
+```yaml
+- insert:
+    - id: dsharness
+      name: ./index.mjs
+    - name: '@deepseek-ai/dsh-plugin-manager'
+      disabled: true
+```
+
+`PluginManager.protectsManager(name)`（`packages/boot/plugin-manager/src/index.ts:763-773`）在**该包 patch 插入的任意一行**命中那个文件的 `protectedModules`（`:66-76`）时为真，而 `@deepseek-ai/dsh-plugin-manager` 正是其中之一。两个动作都失败，用真 `boot()` + 真 `PluginManager` 实测：
+
+```text
+setBundleEnabled('dsharness', false) → application: 'failed', changed: false, error: { code: 'management-required' }
+removeBundle('dsharness')            → application: 'failed', changed: false, error: { code: 'not-removable' }
+```
+
+两个细节让这行影子行既看不见也不花钱：
+
+- **它没有 `id`。** `declaredRows`（`:647+`）只收 `id` 是字符串的行，所以它永远进不了卡片的行列表 —— 用户看到的是一行，不是两行。
+- **`disabled: true`。** Loader 对 disabled 行**在 `import()` 之前就返回**（`vendor/loader/src/config/entry.ts:136-139`），所以那个模块名根本不会被解析，也不会多出一份依赖。
+
+判断条件的后半段 `` `include:${row.id}` === this.ownerEntryId `` 是死代码：`ownerEntryId`（`:207`）就是字面量 `'include'`，任何行 id 都拼不出它。整个保护只靠模块名那一半。
+
+#### 旧版本 provision 过的 profile 会回收被替换的包
+
+旧构建会 provision 四个各自独立的组合包 —— `dsharness-model-key`、`dsharness-update`、`dsharness-update-ui`、`dsharness-host-auth` —— 所以这样的 profile 在 manifest 的 `dependencies` 与 `dsh.profile.bundles` 里仍然写着它们，`node_modules` 下也还留着目录。留在那儿它们会继续跑：各自的行走会挂起第二个网关、第二条模型 Key 投递循环、以及**第二套**更新面 —— 正是合并要消掉的重复。
+
+`provision.mjs` 显式且幂等地回收它们。名单是 `REPLACED_PLUGINS`；`planProvisioning(...).retired` 与 `provisionProfile(...).retired` 报告这件事。回收会移除依赖项、移除选中项、并在放好替代品**之前**删掉目录 —— 依赖项必须一起移除，因为 manifest 不声明的包会在 pnpm 下次运行时被剪掉，只删目录是留不住的。这是「选中项只增不减」的唯一一处成文例外。
 
 #### 一处值得知道的不对称
 
 pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是**真目录**，放在 `<profile>/node_modules` 里，依赖记成 `file:./node_modules/<name>`（`pluginInstallSpec`）。这样也不需要符号链接权限 —— 在 Windows 上那意味着得开开发者模式。
 
-我们自己的包直接落盘、完全不需要包管理器，所以网关插件在从没连过 npm 的机器上也能用；只有 `dshmarket` 走 pnpm。插件市场装失败会带上精确的手工命令如实报告，绝不会让部署失败。
+我们自己的包直接落盘、完全不需要包管理器，所以这个组合包在从没连过 npm 的机器上也能用；只有 `dshmarket` 走 pnpm。插件市场装失败会带上精确的手工命令如实报告，绝不会让部署失败。
 
-#### 在长寿命进程里「关掉」并不会作废已发出的 cookie
+#### 已发出的连接 cookie 会比包装本身活得久
 
-实测：经 `setBundleEnabled` 打开再关闭之后，`listBundles` 说 `enabled: false`、`pluginInventory/list` 里也没有那一行了 —— 但带**正确密钥**的请求**仍然 200**（无密钥与错密钥仍是 401，所以不是恒真放行）。清理确实恢复了 `connection` 上的方法引用，但**已经换取过的连接 cookie 仍是有效的短时凭证**：官方并不会在每次请求上复查它由谁铸的。这要动上游的 `connection` 才能修，而它不影响默认态 —— 默认从没打开过。要立刻作废就换 `DSH_AUTH_TOKEN` 并重启：那些 cookie 是用连接层密钥签的。
+在这个包还能开关时实测：`setBundleEnabled` 关掉之后，`listBundles` 说 `enabled: false`、`pluginInventory/list` 里也没有那一行了 —— 但带**正确密钥**的请求**仍然 200**（无密钥与错密钥仍是 401，所以不是恒真放行）。清理确实恢复了 `connection` 上的方法引用，而**已经换取过的连接 cookie 仍是有效的短时凭证**：官方并不会在每次请求上复查它由谁铸的。这要动上游的 `connection` 才能修。对这一个包，插件页已经走不到那个状态，且默认一直是启用；要立刻作废已发出的 cookie 就换 `DSH_AUTH_TOKEN` 并重启：那些 cookie 是用连接层密钥签的。
 
-### 服务端到服务端访问官方 `/api`（`host-auth.mjs`）
+### 服务端到服务端访问官方 `/api`（`dsharness.mjs` 的网关组件）
 
 官方 `/api` 用的是一个只有拿着 `dsh web` 启动令牌的浏览器才换得到的 cookie（`packages/client/connection/src/browser-auth.ts`）。**没有浏览器**的调用方 —— 另一个产品的服务端、脚本、小程序后端 —— 拿不到它，也不该为此去跑一个浏览器。
 
-`host-auth.mjs` 增加一种落在同一处的凭据：正确的共享密钥（`Authorization: Bearer <密钥>`，或本插件发的 cookie）会被换算成**只服务这一次请求**的连接 cookie，追加到请求上。官方那两层校验照常执行，只是它们看到的请求已经满足了要求。
+`dsharness.mjs` 的网关组件增加一种落在同一处的凭据：正确的共享密钥（`Authorization: Bearer <密钥>`，或本组件发的 cookie）会被换算成**只服务这一次请求**的连接 cookie，追加到请求上。官方那两层校验照常执行，只是它们看到的请求已经满足了要求。
 
 | 调用方 | 怎么进去 |
 |--------|----------|
-| 不带凭证 | 被官方连接层 401 —— 本插件自己不放开任何东西 |
+| 不带凭证 | 被官方连接层 401 —— 本组件自己不放开任何东西 |
 | 错密钥 / 过短密钥 | 同上，401 |
 | `Authorization: Bearer <密钥>` | 放行；覆盖 unary RPC **以及** `/api/remote.mux` 升级 |
 | 局域网里的浏览器 | `/dsharness/auth` 用密钥换 cookie，之后 `/` 与 `/api` 都能用 |
@@ -268,7 +312,7 @@ pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是
 
 ### 端口与密钥必须能被读到（`/dsharness/gateway`）
 
-用户报的是「无法对接」，而原因是结构性的：端口与共享密钥只活在进程里。`dsh web` 只在**启动那一次**把 `?token=` 打到终端，而桌面端连终端都没有。所以 `host-auth.mjs` 把这两样都渲染出来：
+用户报的是「无法对接」，而原因是结构性的：端口与共享密钥只活在进程里。`dsh web` 只在**启动那一次**把 `?token=` 打到终端，而桌面端连终端都没有。所以网关组件把这两样都渲染出来：
 
 | 面 | 给什么 |
 |----|--------|
@@ -283,12 +327,12 @@ pnpm 会把指向 profile 之外的 `link:` 目标剪掉，所以生成的包是
 
 密钥未配置（或太短）时现在改成**生成并持久化**，而不是让插件整体不挂载：部署行总是给出 `token` 键，所以「未配置」才是默认态，而一条会自己关掉的通道没有任何东西可显示。生成的值写进凭据层的 `DSHARNESS_AUTH_TOKEN`，因此跨重启稳定 —— 每次启动都变的密钥，是用户永远抄不下来的密钥。要关掉这条通道只有 `enabled: false`。
 
-两个面都注册成 `kind: 'exact'`，并且在 `authorizeIndex` 上额外放行：`webServer.match()` 先查 exact 表，但 `frontend-static` 会把 index 请求交给 `authorizeIndex`，而它只认 `GET /` —— 不放行的话这两页能不能读到就取决于路由注册谁先赢。
+几个面都注册成 `kind: 'exact'`，并且在 `authorizeIndex` 上额外放行：`webServer.match()` 先查 exact 表，但 `frontend-static` 会把 index 请求交给 `authorizeIndex`，而它只认 `GET /` —— 不放行的话这几页能不能读到就取决于路由注册谁先赢。
 
 
-它包装的是 `connection.requestRejection` 与 `connection.authorizeIndex`，而不是注册路由 —— 因为 `/api` 已经被占了：`webServer.register` 对同一个 `(kind, path)` 重复注册会抛错，而升级握手那条路由由 `api-gateway` 单独注册。两处准入判断最终都汇到这两个服务方法上，所以**一处包装覆盖全部载体**。
+网关组件包装的是 `connection.requestRejection` 与 `connection.authorizeIndex`，而不是注册路由 —— 因为 `/api` 已经被占了：`webServer.register` 对同一个 `(kind, path)` 重复注册会抛错，而升级握手那条路由由 `api-gateway` 单独注册。两处准入判断最终都汇到这两个服务方法上，所以**一处包装覆盖全部载体**。
 
-它**不是第二套鉴权**：Host/Origin 围栏与连接 cookie 校验仍然做决定，没有新增信任主体，比较用 `timingSafeEqual`。插件是零依赖 `.mjs`（只 import `node:` 内置模块），因为本层没有 `node_modules`：配置按普通对象读，连接凭据的键直接写字面量（`client-connection/browser-session`，也就是 `credentialKey(scope, id)` 的产物）。
+它**不是第二套鉴权**：Host/Origin 围栏与连接 cookie 校验仍然做决定，没有新增信任主体，比较用 `timingSafeEqual`。整个组合包都是零依赖 `.mjs`（只 import `node:` 内置模块），因为本层没有 `node_modules`：每个组件都按普通对象读配置，网关那个组件把连接凭据的键直接写字面量（`client-connection/browser-session`，也就是 `credentialKey(scope, id)` 的产物）。
 
 启动时它会铸一个 cookie 走一遍官方 `requestRejection` 做自检；上游格式漂移会**立刻 warn**，而不是等到线上 401。`check-host-auth.mjs` 对跑着的 profile 覆盖整条链路：
 
@@ -350,7 +394,7 @@ $env:DSH_E2E_EMAIL='<a user that exists in this product>'; node platform/check-d
 
 ## 它改了什么
 
-`cordis.patch.yml` 改的是上游**已经声明**的四行。补丁是**整块替换** `config`，所以每次覆盖都要把该行拥有的键全部重述一遍。这里**不插入**任何自有插件 —— 它们改成组合包发布，理由见上文。
+`cordis.patch.yml` 改的是上游**已经声明**的四行。补丁是**整块替换** `config`，所以每次覆盖都要把该行拥有的键全部重述一遍。这里**不插入**任何自有插件 —— 它改成组合包发布，理由见上文。
 
 | 行 | 上游默认 | 本部署 |
 |----|----------|--------|
@@ -388,37 +432,72 @@ dsharness-relay:
 
 **这是已知的一条登出路径，不是全部解释。** 其余能让同一份凭据点失效的路径：产品自己那几个账号端点回 401 / `code: 40003`（`server/src/lib/dsh-account.ts:84-86`；退登或管理端停用会提升 `tokenVersion`，从而复现）；以及启动时的 `issuer-mismatch`，它连一次请求都不发就丢掉 grant（`.../deepseek-account-platform/src/index.ts:167-176`），Host 日志里会留 `stored grant discarded`。排查「被踢回登录」要分清是这三条里的哪一条，不能默认是这一条。
 
-### key 缺的那一步：投递（`model-key.mjs`）
+### key 缺的那一步：投递（`dsharness.mjs` 的模型 Key 组件）
 
 产品 server 一直在 `GET /api/account/model-access` 回该用户的网关 key，而本 fork 里**从来没有东西读它**：在 `client/` 里搜 `model-access`、`apiKeyCreated`、`dshModelKey` 是 **0 处命中**。于是上面那条 route 没有任何凭据，每次请求都以 `MISSING_CREDENTIAL` 失败。
 
-`platform/model-key.mjs` 就是那个消费者。它在账户状态变化时向产品 server 要 key，写进凭据层的 `DSHARNESS_MODEL_KEY`（正是 `llm-pi-ai` 的 `apiKeyEnv` 指的那个引用），并在退登或拿到未授权答复时删掉。传输失败**保留**已写入的 key —— 一个 `503` 说明不了网关 key 还有没有效。
+`dsharness.mjs` 的模型 Key 组件就是那个消费者。它在账户状态变化时向产品 server 要 key，写进凭据层的 `DSHARNESS_MODEL_KEY`（正是 `llm-pi-ai` 的 `apiKeyEnv` 指的那个引用），并在退登或拿到未授权答复时删掉。传输失败**保留**已写入的 key —— 一个 `503` 说明不了网关 key 还有没有效。
 
-### 检查更新（`update.mjs`）
+### 检查更新（`dsharness.mjs` 的更新组件）
 
 官方 updater 需要 `app-update.yml` 在应用的 resources 旁边，而未签名构建永远不会有它：`publish: null`（`apps/desktop/scripts/electron-builder-config.mjs:249`）让 electron-builder 不生成那个文件（`app-builder-lib/out/publish/PublishManager.js:87-90`），而 `update-coordinator.ts:54` 正要求它、`:185` 缺它就抛。安装器自己投放一份（`platform/windows/app-update.yml`）就成立，因为 `NsisUpdater.verifySignature()` 在 `publisherName` 缺席时返回 null —— 即**不做任何校验就接受**（`electron-updater/out/NsisUpdater.js:84-100`）。那个键是**故意不写**的：写了就会去跑真 Authenticode 校验，每次更新都以 `ERR_UPDATER_INVALID_SIGNATURE` 失败。
 
-所以 `platform/update.mjs` 自己给答案：`/dsharness/update`（HTML）与 `/dsharness/update.json`，拿已装版本与产品 server 在 `GET /api/config/version` 发布的版本比。它只**报告**，不下载也不安装。
+所以 `dsharness.mjs` 的更新组件自己给答案：`/dsharness/update`（HTML）与 `/dsharness/update.json`，拿已装版本与产品 server 在 `GET /api/config/version` 发布的版本比。它只**报告**，不下载也不安装。
 
 已装版本来自 `<DSH_HOME>/dsharness-install.json`，由载荷在安装期写下。安装器把 NSIS 的 `${VERSION}` 传进去 —— 那是 electron-builder 按打包版本定义的，而**未签名构建里只有安装器知道用户装的是哪一版**。
 
 ⚠️ 两份发布记录是**两个不同的存储**，两边都必须写：`wb_client_release`（Platform，官网渲染它）与产品 server 的 `desktopRelease`（客户端读它）。实测过的漂移就是 `register-client-release.mjs` 现在两边都写的原因：官网写着 `0.2.1-alpha.1.20261007.2`，而 `/api/config/version` 还在回 `0.2.0`，于是刚装好的客户端被告知「已是最新」。
 
-### 应用内的检查更新入口（`update-ui.js`）
+### 应用内的检查更新入口（浏览器半边 `dsharness-ui.js`）
 
 上面那一面回答的是「这是哪个版本」，它不是用户会去的地方。壳里其实已经暴露了**真正的应用内更新 UI** —— `dshDesktop.updates.open()`（`apps/desktop/src/preload-app.ts:49-57`，契约在 `ipc.ts:82-86`）会调 `main.ts` 的 `openUpdatePrompt()` 弹出原生的检查 / 下载 / 安装对话框 —— 但**出厂界面里没有任何东西调它**：唯一知道更新状态的那个组件（`DesktopUpdateIndicator.tsx:64`）在 idle 时什么都不渲染。所以在用户拿到的产品里，这个动作根本没有可点的路径；在 `packages/` 与 `apps/` 下搜 `updates.open`，命中的只有 preload、它的测试和那个指示器，没有任何入口。
 
-这就是这一层必须是**插件**而不是改上游的原因：`settings.general.item` 是上游公开的扩展位（声明在 `packages/client/ui-settings/src/client/contract/slots.ts:92`），一个注册者只需要一次 `slots.register`，而本 fork 的规矩是 `packages/` 与 `apps/` 一个字节都不碰。所以 `update-ui.js` 往「设置 › 通用」加一行，order 90（夹在 `developer-tools` 与 `current-version` 之间），按钮调 `globalThis.dshDesktop?.updates?.open()`，状态行把订阅到的 `status()` phase 说成人话。
+这就是这一层必须是**插件**而不是改上游的原因：`settings.general.item` 是上游公开的扩展位（声明在 `packages/client/ui-settings/src/client/contract/slots.ts:92`），一个注册者只需要一次 `slots.register`，而本 fork 的规矩是 `packages/` 与 `apps/` 一个字节都不碰。所以 `dsharness-ui.js` 往「设置 › 通用」加一行，order 90（夹在 `developer-tools` 与 `current-version` 之间），按钮调 `globalThis.dshDesktop?.updates?.open()`，状态行把订阅到的 `status()` phase 说成人话。它和面板显示的是**同一个**更新组件；没有第二个更新插件，也没有重复文案。
 
-三个细节是刻意的，且都有 `update-ui.test.mjs` 的断言：
+三个细节是刻意的，且都有 `dsharness-ui.test.mjs` 的断言：
 
-- **bundle 是经典脚本，所以这个插件是两个文件。** 客户端模块系统用 `document.createElement('script')` 加载 bundle（`packages/client/modules/src/client/system.ts:16-29`），并按包名对账注册 `id`，所以 `update-ui.js` 只能通过 `window.__ModuleLoader__.load(...)` 注册自己，不可能是 ESM 插件；而 Node 那边 import 的是 bundle 行的 `index.mjs`。`update-ui.host.mjs` 就是那个空实现的宿主半，`provision.mjs` 的 `clientEntry` 字段把浏览器半拷成包内的 `client.js` —— 一个包要同时是 bundle 行**和**被服务的浏览器 bundle，两者都需要。
+- **浏览器半边是经典脚本，所以这个组合包是两个文件。** 客户端模块系统用 `document.createElement('script')` 加载 bundle（`packages/client/modules/src/client/system.ts:16-29`），并按包名对账注册 `id` —— 所以 `dsharness-ui.js` 只能通过 `window.__ModuleLoader__.load(...)` 注册自己，不可能是 ESM 插件；而 Node 那边 import 的是 bundle 行的 ESM 入口。因此宿主半边是一个**真插件** `dsharness.mjs`，它把三个宿主组件挂成子插件；`provision.mjs` 的 `clientEntry` 字段把浏览器半拷成包内的 `client.js` —— 一个包要同时是 bundle 行**和**被服务的浏览器 bundle，两者都需要。注册 `id` 必须逐字符等于包名 `dsharness`。
 - **这一行不需要任何上下文。** `settings.general.item` 的 owner props 是空的，而 `dsh-client-locale` 不在客户端 bundle 可 `require` 的 9 个基线模块里（`packages/client/web/src/platform.ts`），所以文案是内置的，按 `navigator.language`（退回 `<html lang>`）选中英。服务缺席时不会有任何东西消失 —— 这条路径上压根没有服务。
 - **浏览器里降级而不是报错。** 没有 `dshDesktop`（纯 `dsh web` profile）时这一行会说明原因并禁用按钮。
 
 `platform/windows/app-update.yml` 是同一功能的另一半，而且**刻意走两条路**：NSIS include 把它拷进 `$INSTDIR\resources`，让打包后的 updater 有 feed 可读；`windows/update-descriptor.mjs` 同时把它加进 electron-builder 的 `extraResources`，让它**在安装器跑之前就已经在包里**。第二条路存在的理由是实测出来的顺序问题：更新安装是静默 + 强启，assisted 安装器会在安装段结束时先重启应用（`app-builder-lib/templates/nsis/installSection.nsh:105-109`）—— 用 NSIS 顺序探针实测：重启那一刻描述文件还不存在，`.onInstSuccess` 紧接着才写入。只靠 include 的话，刚重启的那个实例会以 `enabled() === false`（`update-coordinator.ts:54`）做启动检查并报一次失败，之后重试才成功。所以 include 里的 `File` 是覆盖一份相同副本，而不是创造它。
 
 那个文件里的缓存目录名是与**安装器**的约定，不是随便起的标签：`updaterCacheDirName: '@deepseek-aidsh-desktop-updater'` 必须等于安装器算出来的值，因为卸载器删除的正是 `%LOCALAPPDATA%\<该名>`（`apps/desktop/installer/uninstall.nsh:34`），而 updater 会把约 292 MB 的未完成下载留在 `<该名>\pending`。该值来自 `appInfo.updaterCacheDirName`（`app-builder-lib/out/appInfo.js:126-128`，即 `sanitizedName.toLowerCase() + '-updater'`，`sanitizeFileName` 会保留 `@`），构建把它原样记成 `!define DSH_UPDATER_CACHE_NAME "@deepseek-aidsh-desktop-updater"` —— 在构建产物 `builder-debug.yml` 里实测得到。名字不一致不会让更新坏掉，只会在卸载时**静默留下**那笔下载，所以 `deploy-payload.test.mjs` 把它钉住了。引号是必需的：YAML 把行首的 `@` 当保留指示符。
+
+### 组件状态面板（浏览器半边 `dsharness-ui.js`）
+
+这里有两个来自用户的口径：
+
+> 可以把…这些插件合并成码农 DSH 插件，其中包了多个组件。该插件虽然是已安装的自定义插件，但是是不可以关闭的
+> 应该都是不能改的…插件的组件中只是显示组件状态，而不需要显示key的信息
+
+第一条是「一个包四个组件、而不是四个包」的由来；第二条是「面板只读」的由来。合并同时消掉了重复：设置里那一行「检查更新」与面板里的更新行现在是同一个更新组件，不再是两个插件。
+
+面板占的是插件页上**这个包自己的卡片**里的 `plugins.bundle.config` 槽位（按 `key` 注册，必须等于包名 `dsharness`），所以不用多一张卡、也不用多一行 Loader 行就能看到组件状态。它画四行：
+
+| 组件 | 显示的状态 | 显示的事实 |
+|------|------------|------------|
+| 本机网关 | 运行中 / 未启用 | 监听端口、本机地址、共享密钥配没配 |
+| 模型 Key | 已同步 / 未同步 / 未登录 | 凭据引用名（`DSHARNESS_MODEL_KEY`）以及它有没有值 |
+| 检查更新 | 已是最新 / 有新版本 / 尚未检查 / 查询失败 | 当前版本、最新版本、实时 phase，以及打开桌面端更新对话框的按钮 |
+| 账号与费用 | 已登录 / 未登录 | 用户名（或掩码后的联系方式），以及每个钱包的余额 |
+
+数据来自网关组件注册的只读面 `GET /dsharness/status.json`。字段恰好是：
+
+```text
+{ok, port, address, tokenConfigured, cookieName, loginPath, gatewayPath,
+ version:{current,latest,updateAvailable},
+ modelKey:{ref,configured},
+ account:{signedIn,name,contact,balance:[{currency,balance}]},
+ checkedAt}
+```
+
+两点是刻意的：
+
+- **它不含任何凭据。** `tokenConfigured` 与 `modelKey.configured` 是布尔，从不回值；没有任何字段装着共享密钥或模型 Key。唯一显示共享密钥的面仍是 `/dsharness/gateway` 与 `/dsharness/gateway.json`，它们和这一面一样只在回环上回。
+- **只在回环上、且只读。** 非回环请求得到 `403`；非 `GET` 得到 `405`。面板里没有任何可写的东西：没有输入框、没有开关、没有配置表单 —— 面板只渲染状态槽，其它 view 只回一行 summary。版本段有 60 秒 TTL 缓存，并与更新组件共用同一个 origin，所以面板与更新页不会对「最新版本」各说一套。
+
+浏览器半边挂载时取一次状态面，之后每 10 秒轮询一次；拿到 403、超时或响应体不是对象时降级成「状态暂时读不到」，其余行照常渲染，绝不抛错。
 
 ### 客户端打包时写死的地址必须能直达本产品
 

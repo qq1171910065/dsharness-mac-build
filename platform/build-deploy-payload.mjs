@@ -30,7 +30,7 @@
  *   node platform/build-deploy-payload.mjs --check               # fail when stale
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,14 +52,14 @@ export const DEFAULT_PLATFORM_ORIGIN = 'https://www.czmanong.com';
 /**
  * Payload modules copied verbatim from `platform/`.
  *
- * Both halves of `dsharness-update-ui` are listed: `provision.mjs` generates its
- * bundle package from `plugin.entry` / `plugin.clientEntry` **relative to its own
- * directory** (`here` in `provision.mjs`), so an installed payload that carried
- * only one of them would fail to provision that plugin.
+ * Both halves of the shipped bundle are listed: `provision.mjs` generates its package
+ * from `plugin.entry` / `plugin.clientEntry` **relative to its own directory** (`here` in
+ * `provision.mjs`), so an installed payload that carried only one of them would fail to
+ * provision the plugin. The bundle is one package — host half plus browser half — which is
+ * why there is one `.mjs` and one `.js` here rather than a file per component.
  */
 export const PAYLOAD_MODULES = [
-  'home.mjs', 'provision.mjs', 'install.mjs', 'host-auth.mjs', 'model-key.mjs', 'update.mjs',
-  'update-ui.js', 'update-ui.host.mjs',
+  'home.mjs', 'provision.mjs', 'install.mjs', 'dsharness.mjs', 'dsharness-ui.js',
 ];
 
 /** The row file whose `platformOrigin` line the build rewrites. */
@@ -101,6 +101,16 @@ export function renderDeployPatch(patch, origin) {
 /**
  * Write (or verify) the payload directory.
  *
+ * Files this round no longer ships are **deleted**, which is the one destructive part
+ * and is deliberate: the directory is embedded wholesale by NSIS (`File` per module), so a
+ * leftover copy is not inert — it ships. Measured while merging the four plugin packages
+ * into one: without pruning, `deploy/host-auth.mjs`, `model-key.mjs`, `update.mjs` and both
+ * `update-ui.*` halves stayed behind and kept being embedded after `provision.mjs` had
+ * stopped generating the packages that read them.
+ *
+ * Only plain files directly inside the directory are considered; anything else there
+ * (including subdirectories) is left alone.
+ *
  * @param options - `root` overrides the `platform/` directory; `origin` the
  *   baked origin; `check` compares instead of writing.
  * @returns the absolute payload directory.
@@ -130,6 +140,15 @@ export function buildDeployPayload(options = {}) {
   write(PATCH_SOURCE, renderDeployPatch(patch, origin));
   if (!existsSync(join(target, PAYLOAD_ENTRY))) {
     throw new Error(`deploy payload: missing ${join(target, PAYLOAD_ENTRY)}; it is hand-written and must be committed`);
+  }
+  const expected = new Set([...PAYLOAD_MODULES, PATCH_SOURCE, PAYLOAD_ENTRY]);
+  for (const entry of readdirSync(target, { withFileTypes: true })) {
+    if (!entry.isFile() || expected.has(entry.name)) continue;
+    if (options.check === true) {
+      stale.push(`(removed) ${entry.name}`);
+      continue;
+    }
+    rmSync(join(target, entry.name));
   }
   if (stale.length > 0) {
     throw new Error(`deploy payload: ${stale.join(', ')} in ${target} is stale; run node platform/build-deploy-payload.mjs`);

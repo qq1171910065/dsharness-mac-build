@@ -16,6 +16,7 @@ import {
   deploy, ensureDesktopProfile, PROFILE_BUNDLES, PROFILE_PATCH_TEMPLATE, PROFILE_PNPM_WORKSPACE, profilesUnder,
   recordInstalledVersion,
 } from './windows/deploy/deploy-entry.mjs';
+import { PROFILE_PLUGINS } from './provision.mjs';
 
 /**
  * The installer seam's contract.
@@ -130,14 +131,14 @@ test('deploy payload: the shipped key reference matches the plugin that writes i
   // Two files name the credential: the route's `apiKeyEnv` and the plugin that
   // stores it. A mismatch is a silent `MISSING_CREDENTIAL` on every request, so the
   // pair is compared rather than each being checked against a literal.
-  const { DEFAULT_REF } = await import('./model-key.mjs');
+  const { MODEL_KEY_REF } = await import('./dsharness.mjs');
   const { PROFILE_PLUGINS } = await import('./provision.mjs');
   const text = readFileSync(join(payloadDirectory(here), 'cordis.patch.yml'), 'utf8');
-  assert.match(text, new RegExp(`apiKeyEnv: '${DEFAULT_REF}'`, 'u'));
+  assert.match(text, new RegExp(`apiKeyEnv: '${MODEL_KEY_REF}'`, 'u'));
   // The row is inserted by the provisioned package's own patch, so it is NOT in this
-  // file; what must hold here is that the plugin writing {@link DEFAULT_REF} is one
+  // file; what must hold here is that the plugin writing {@link MODEL_KEY_REF} is one
   // of the packages provisioning ships.
-  const writer = PROFILE_PLUGINS.find((plugin) => plugin.entry === 'model-key.mjs');
+  const writer = PROFILE_PLUGINS.find((plugin) => plugin.entry === 'dsharness.mjs');
   assert.ok(writer !== undefined, 'provisioning must ship the plugin that writes the key');
   assert.equal(writer.defaultEnabled, true, 'a model route with no credential fails every request');
 });
@@ -207,11 +208,21 @@ test('installer include: runs the deployment layer from the installed applicatio
   for (const file of [...PAYLOAD_MODULES, PAYLOAD_ENTRY, 'cordis.patch.yml']) {
     assert.ok(text.includes(`deploy\\${file}`), `the include must embed ${file}`);
   }
-  // The browser half of the settings entry travels with the payload like any
-  // other module: `provision.mjs` reads it from its own directory at install
-  // time, so an installer that omitted it would fail to create the bundle.
-  assert.ok(text.includes('deploy\\update-ui.js'), 'the include must embed the browser half');
-  assert.ok(text.includes('deploy\\update-ui.host.mjs'), 'the include must embed the host half');
+  /*
+   * The browser half of the shipped bundle travels with the payload like any other
+   * module: `provision.mjs` reads `plugin.entry` / `plugin.clientEntry` relative to its
+   * own directory at install time, so a payload missing either one fails to generate the
+   * bundle. Both halves are already payload modules, so rather than repeating their names
+   * this compares the two lists -- measured while merging the four plugin packages, where
+   * a stale `clientEntry` name made `buildDeployPayload` throw "missing source" long after
+   * the file had been deleted.
+   */
+  for (const plugin of PROFILE_PLUGINS) {
+    assert.ok(PAYLOAD_MODULES.includes(plugin.entry), `payload must carry ${plugin.entry}`);
+    if (plugin.clientEntry !== undefined) {
+      assert.ok(PAYLOAD_MODULES.includes(plugin.clientEntry), `payload must carry ${plugin.clientEntry}`);
+    }
+  }
   assert.match(text, /nsExec::ExecToLog '.*resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node\.exe.*deploy-entry\.mjs.*\$INSTDIR.*'/u);
   assert.match(text, /DetailPrint "DSH Desktop: deployment layer exited with \$0"/u);
   /*
@@ -237,12 +248,12 @@ test('installer include: ${VERSION} is an NSIS define electron-builder supplies'
 test('deploy entry: the installer version is recorded for the update check', async () => {
   const home = temporaryDirectory('deploy-version-');
   /*
-   * The reader and the writer live in different payload modules (`update.mjs` reads
+   * The reader and the writer live in different payload modules (`dsharness.mjs` reads
    * the record, `deploy-entry.mjs` writes it) and neither can import the other: the
    * payload directory is flat, so the file name is a literal in both. Read them here
    * and compare, so a rename cannot silently break the feature.
    */
-  const { INSTALL_RECORD, readInstallRecord } = await import('./update.mjs');
+  const { INSTALL_RECORD, readInstallRecord } = await import('./dsharness.mjs');
   try {
     // No version supplied (a hand-run `deploy-entry.mjs`, or an older installer):
     // nothing is written, so the page says "unknown" rather than inventing a value.
@@ -355,20 +366,26 @@ test('deploy entry: writes the rows and provisions every profile, with an inject
     assert.deepEqual(calls[0].args.slice(0, 1), ['add']);
     assert.ok(calls[0].args.includes('dshmarket'), 'the marketplace install is what makes the Plugins page work');
     // The generated bundle package is placed without a package manager, so it survives an offline install.
-    assert.ok(existsSync(join(home, 'profiles', 'desktop', 'node_modules', 'dsharness-host-auth', 'index.mjs')));
+    const bundleDir = join(home, 'profiles', 'desktop', 'node_modules', 'dsharness');
+    assert.ok(existsSync(join(bundleDir, 'index.mjs')));
     /*
      * The browser half travels with the payload too. `provision.mjs` reads
-     * `plugin.clientEntry` relative to its own directory, so an installed
-     * payload carrying only `update-ui.host.mjs` would fail to generate that
-     * package -- which is why both files are in PAYLOAD_MODULES and both are
-     * embedded by the NSIS include.
+     * `plugin.clientEntry` relative to its own directory, so an installed payload
+     * carrying only the host half would fail to generate the package -- which is why both
+     * files are in PAYLOAD_MODULES and both are embedded by the NSIS include.
      */
-    const clientHalf = join(home, 'profiles', 'desktop', 'node_modules', 'dsharness-update-ui');
-    assert.ok(existsSync(join(clientHalf, 'client.js')), 'the browser half must be generated by an installed payload');
-    assert.ok(existsSync(join(clientHalf, 'index.mjs')));
-    const installed = JSON.parse(readFileSync(join(clientHalf, 'package.json'), 'utf8'));
+    assert.ok(existsSync(join(bundleDir, 'client.js')), 'the browser half must be generated by an installed payload');
+    const installed = JSON.parse(readFileSync(join(bundleDir, 'package.json'), 'utf8'));
     assert.equal(installed.dsh.client.platform, 'web');
     assert.equal(installed.exports['./client'], './client.js');
+    /*
+     * The installed patch is what makes the card unclosable, and it is generated by the
+     * payload -- so this is the last place the shield can be lost between here and an
+     * end-user machine. `listBundles` reads it from the profile, not from `platform/`.
+     */
+    const patch = readFileSync(join(bundleDir, 'cordis.patch.yml'), 'utf8');
+    assert.match(patch, /^ {4}- id: dsharness$/mu);
+    assert.match(patch, /^ {4}- name: '@deepseek-ai\/dsh-plugin-manager'\n {6}disabled: true$/mu);
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(install, { recursive: true, force: true });

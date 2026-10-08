@@ -62,6 +62,19 @@
  * `platform/cordis.patch.yml` and letting the package own its row removes the
  * question entirely.
  *
+ * ### Why the bundle's own row carries a `disabled` shield
+ *
+ * 用户口径：「该插件虽然是已安装的自定义插件，但是是不可以关闭的」。The switch is
+ * `setBundleEnabled`, and the only documented way a bundle refuses it is
+ * `protectsManager(name)` → `readOnlyReason: 'management-required'`. That predicate is
+ * true when any row the bundle inserts names a `protectedModules` entry, so the bundle's
+ * patch carries one extra **id-less**, **disabled** row naming
+ * `@deepseek-ai/dsh-plugin-manager`. See {@link pluginPatch} for why that row is
+ * invisible on the card and costs nothing at boot. Measured on a real `boot()`:
+ * `listBundles()` → `readOnlyReason: 'management-required', removable: false`;
+ * `setBundleEnabled('dsharness', false)` → `management-required`;
+ * `removeBundle('dsharness')` → `not-removable`.
+ *
  * ## What this writes, where
  *
  * 1. `<profile>/node_modules/<name>/` — the bundle package, generated from the
@@ -71,7 +84,9 @@
  * 2. `<profile>/package.json` — the `dependencies` entry for it, plus the
  *    `dsh.profile.bundles` selection of anything that should start switched on.
  *    A selection is only ever **added**, never removed: what the person switched in
- *    the page is theirs.
+ *    the page is theirs. The one exception is a package a **previous round shipped and
+ *    this round replaced** ({@link REPLACED_PLUGINS}) — that one loses both flags and its
+ *    directory, because leaving it would run a second copy of the same behaviour.
  * 3. Whatever is missing from a registry, through pnpm (today only `dshmarket`).
  *
  * ## Failure policy
@@ -129,64 +144,66 @@ export function pluginInstallSpec(name) {
  */
 export const PROFILE_PLUGINS = [
   {
-    name: 'dsharness-model-key',
-    entry: 'model-key.mjs',
-    rowId: 'dsharness-model-key',
-    title: 'DSH Desktop model key',
-    zhTitle: 'DSH Desktop 模型 Key',
-    description: 'Fetches this account\u2019s own gateway key and stores it for the model route this product ships.',
-    zhDescription: '登录后取本产品为该用户签发的网关 Key，写进模型调用要用的凭据引用。',
-    defaultEnabled: true,
-  },
-  {
-    name: 'dsharness-update',
-    entry: 'update.mjs',
-    rowId: 'dsharness-update',
-    title: 'DSH Desktop update check',
-    zhTitle: 'DSH Desktop 检查更新',
-    description: 'Shows the installed version, the latest published one, and where to download it.',
-    zhDescription: '显示当前版本、最新版本与下载地址（未签名安装包不能自动安装）。',
-    defaultEnabled: true,
-  },
-  {
-    name: 'dsharness-update-ui',
+    name: 'dsharness',
+    entry: 'dsharness.mjs',
     /*
-     * Two halves, two files, deliberately.
+     * The browser half, copied in as the package's `client.js`.
      *
-     * The package must be a real Loader row to be a bundle at all, and the
-     * browser roster only scans rows with a live fiber
-     * (`packages/client/modules/src/index.ts:984` skips `entry.fiber === undefined`).
-     * But the browser half is a **classic script** — the client module system
-     * loads it with `document.createElement('script')`
-     * (`.../client/system.ts:16-29`) — so Node cannot `import()` it: it would hit
-     * a missing `window` on its first line. Hence the no-op host half is the
-     * entry (`index.mjs`) and the browser half rides along as `clientEntry`.
+     * Why it must be a second file: the client module system loads a bundle with
+     * `document.createElement('script')` (`packages/client/modules/src/index.ts` →
+     * `client/system.ts:16-29`), so it is a **classic script** — no `import`/`export`, and
+     * it registers itself through `window.__ModuleLoader__.load({id, factory})`. Node
+     * cannot `import()` that file (its first line touches `window`), while the Loader
+     * entry must be an ESM plugin. One file cannot be both, so the host half is the entry
+     * and this one rides along as `clientEntry`. The registration `id` must equal the
+     * package name byte for byte, or the roster drops the bundle silently.
      */
-    entry: 'update-ui.host.mjs',
-    clientEntry: 'update-ui.js',
-    rowId: 'dsharness-update-ui',
-    title: 'DSH Desktop in-app update entry',
-    zhTitle: 'DSH Desktop 应用内检查更新',
-    description: 'Adds a row to Settings General that opens the Desktop update dialog.',
-    zhDescription: '在「设置 › 通用」里放一行入口，打开桌面端的更新对话框（检查 / 下载 / 安装）。',
+    clientEntry: 'dsharness-ui.js',
+    rowId: 'dsharness',
+    title: 'DSH Desktop (CoderAI DSH)',
+    zhTitle: '码农 DSH',
+    /*
+     * English card text stays pure ASCII: the generated `locale/en.json` travels inside
+     * the NSIS payload and is read back on machines with a non-UTF-8 console, and a
+     * mojibake'd card title is not reported as an error anywhere.
+     */
+    description: 'This product\'s own plugin: local gateway, model key, update check, and a read-only status panel. Cannot be switched off.',
+    zhDescription: '本产品自带的插件：本机网关、模型 Key、检查更新，以及一张只读的组件状态面板。随安装包投放，不能关闭或卸载。',
     defaultEnabled: true,
-  },
-  {
-    name: 'dsharness-host-auth',
-    entry: 'host-auth.mjs',
-    rowId: 'dsharness-host-auth',
-    title: 'DSH Desktop gateway',
-    zhTitle: 'DSH Desktop 网关',
-    description: 'Shared-secret access to the Harness API for this product: mini-program, scripts, other services.',
-    zhDescription: '让本产品的服务端与脚本（小程序、巡检、外部系统）用共享密钥访问 Harness API；并显示端口与密钥。',
-    defaultEnabled: false,
+    /*
+     * 这一行（由 {@link pluginPatch} 生成）带三段配置，对应三个组件各自的开关：
+     * `gateway` 是唯一有部署期输入的一段（密钥来自环境变量）。
+     */
     configLines: [
-      '        # Empty means unconfigured; the plugin then does nothing and logs one warning.',
-      "        token: !!js process.env.DSH_AUTH_TOKEN ?? ''",
-      '        cookieName: dsharness_auth',
-      '        loginPage: true',
+      '        gateway:',
+      '          # 留空＝未配置：组件会自己生成一把并写进凭据层（这样网关信息页才有东西可显示）。',
+      "          token: !!js process.env.DSH_AUTH_TOKEN ?? ''",
+      '          cookieName: dsharness_auth',
+      '          loginPage: true',
+      '        modelKey: {}',
+      '        update: {}',
     ],
   },
+];
+
+/**
+ * Plugin packages earlier rounds wrote, and this round replaces with {@link PROFILE_PLUGINS}.
+ *
+ * The merge happened after the product had already shipped four separate bundles, so a
+ * profile provisioned by an older build still names them in `dependencies` and in
+ * `dsh.profile.bundles`, and still has their directories under `node_modules`. Left
+ * behind, they would keep running: their own rows would mount a second gateway, a second
+ * model-key delivery loop and a **second** update surface — the exact duplication the
+ * merge exists to remove.
+ *
+ * A dependency the manifest does not declare is a package pnpm prunes on its next run, so
+ * removal has to happen in the manifest, not just on disk.
+ */
+export const REPLACED_PLUGINS = [
+  'dsharness-model-key',
+  'dsharness-update',
+  'dsharness-update-ui',
+  'dsharness-host-auth',
 ];
 
 /**
@@ -200,19 +217,50 @@ export const PROFILE_PLUGINS = [
 export const MARKETPLACE_PACKAGE = 'dshmarket';
 
 /**
- * The bundle patch a generated package declares.
+ * The shield row that makes the whole bundle unclosable.
  *
- * `configLines` carries each plugin's own config block; a plugin without one gets
- * a row with no `config` key at all, which Cordis accepts and the plugin's own
- * `resolveConfig` turns into its defaults.
+ * The Plugins page decides `readOnlyReason: 'management-required'` from
+ * `PluginManager.protectsManager(name)`
+ * (`packages/boot/plugin-manager/src/index.ts:763-773`), which is true when **any row
+ * this bundle's patch inserts** names a module in that file's `protectedModules`
+ * (`:66-76`) — and `@deepseek-ai/dsh-plugin-manager` is one of them. So one extra row is
+ * the entire mechanism: it needs no code of ours, no upstream change, and no new service.
+ *
+ * Two properties make the row invisible and harmless:
+ *
+ * - **No `id`.** `declaredRows` (`:647`) collects only rows whose `id` is a string, so
+ *   this one never reaches the card's row list — the person sees one row, not two.
+ * - **`disabled: true`.** The Loader returns *before* `init()` for a disabled row
+ *   (`vendor/loader/src/config/entry.ts:136-139`), so the module is never imported and
+ *   the name need not resolve at all. Measured on a real `boot()`: the row reports
+ *   `{enabled: false, fiberPhase: null}` and nothing logs an import failure.
+ *
+ * Why `@deepseek-ai/dsh-plugin-manager` and not one of the client rows: the protection is
+ * on the *bundle*, and a name used only as an unimported shield costs nothing. Choosing a
+ * row that actually runs would mean shipping a second live copy of it.
+ */
+const SHIELD_ROW_NAME = '@deepseek-ai/dsh-plugin-manager';
+
+/**
+ * The bundle's Loader patch.
+ *
+ * Two rows, and the reasons are different:
+ *
+ * - the product's own row (`id: ${plugin.rowId}`), which is the plugin;
+ * - the id-less shield row above, whose only job is to pin the bundle's read-only state.
+ *
+ * `configLines` carries each plugin's own config block; a plugin without one gets a row
+ * with no `config` key at all, which Cordis accepts and the plugin's own `resolveConfig`
+ * turns into its defaults.
  *
  * @param plugin - one {@link PROFILE_PLUGINS} entry.
  * @returns the patch file contents.
  */
 function pluginPatch(plugin) {
   const row = [
-    '# dsharness bundle patch: one row, mounted only while this bundle is selected.',
-    '# The row carries no `disabled`: selection is the switch the Plugins page writes.',
+    '# dsharness bundle patch: the product row plus the shield that locks this bundle.',
+    '# Neither row carries `disabled` on the product row: selection is the switch the',
+    '# Plugins page writes — except that the shield below makes that switch read-only.',
     '- insert:',
     `    - id: ${plugin.rowId}`,
     '      name: ./index.mjs',
@@ -221,7 +269,14 @@ function pluginPatch(plugin) {
     row.push('      config:');
     row.push(...plugin.configLines);
   }
-  row.push('');
+  row.push(
+    '    # No `id` on purpose: `declaredRows` only lists rows whose id is a string, so this',
+    '    # one never shows up as a phantom row on the card. Being switched off means the Loader',
+    '    # returns before importing it, so the name below is never resolved.',
+    `    - name: '${SHIELD_ROW_NAME}'`,
+    '      disabled: true',
+    '',
+  );
   return row.join('\n');
 }
 
@@ -286,8 +341,7 @@ function pluginManifest(plugin) {
  * A plugin with a `clientEntry` additionally gets that file copied in as
  * `client.js`, the name `exports["./client"]` declares. Copied, not linked, for
  * the same reason as the host half: the installed package is self-contained and
- * `platform/` stays the single place to edit. Plugins without a `clientEntry`
- * (the three that predate this one) produce byte-identical output to before.
+ * `platform/` stays the single place to edit.
  *
  * @param pluginDir - the destination package directory.
  * @param plugin - one {@link PROFILE_PLUGINS} entry.
@@ -359,8 +413,9 @@ function writeManifest(profileDir, manifest) {
  * @param manifest - the current profile manifest.
  * @param options - `plugins` overrides the shipped list; `withMarketplace: false`
  *   drops the marketplace; `specOf` overrides the recorded dependency spec for our
- *   own packages (defaults to {@link pluginInstallSpec}).
- * @returns what to obtain and what to select.
+ *   own packages (defaults to {@link pluginInstallSpec}); `replaced` overrides the
+ *   package names a previous round shipped (defaults to {@link REPLACED_PLUGINS}).
+ * @returns what to obtain, what to select, and what a previous round left behind.
  */
 export function planProvisioning(manifest, options = {}) {
   const plugins = options.plugins ?? PROFILE_PLUGINS;
@@ -386,7 +441,21 @@ export function planProvisioning(manifest, options = {}) {
      */
     if (plugin.defaultEnabled === true && !selected.includes(plugin.name)) select.push(plugin.name);
   }
-  return { link, add, install: [...link, ...add], select };
+  /*
+   * Retirement is the one exception to "selection only grows": a package this round
+   * *replaces* must lose both flags, or it keeps running beside its replacement.
+   *
+   * A profile provisioned by an earlier build names the four old bundles in
+   * `dependencies` AND in `dsh.profile.bundles`. Clearing only the selection would
+   * leave them installed-but-off (still listed as cards); clearing only the dependency
+   * would leave a selection nothing resolves, which the Loader reports as a skipped
+   * bundle on every boot. Both are cleared, and the directories are deleted, so the
+   * replacement is the only copy.
+   */
+  const retired = (options.replaced ?? REPLACED_PLUGINS)
+    .filter((name) => Object.hasOwn(dependencies, name) || selected.includes(name))
+    .filter((name) => !wanted.some((plugin) => plugin.name === name));
+  return { link, add, install: [...link, ...add], select, retired };
 }
 
 /** Resolve the pnpm entry this repository already depends on, falling back to PATH. */
@@ -463,6 +532,36 @@ export function provisionProfile(home, profile, options = {}) {
   if (options.write === false) return { profile, status: 'planned', ...plan };
 
   /*
+   * 0. Retire the packages a previous round shipped, **before** anything is written.
+   *
+   * Doing it first is what makes the change observable in one run: the replacement is
+   * placed immediately afterwards, so a profile never boots with both the old bundles and
+   * the new one. Both flags have to go, for the reasons in {@link planProvisioning}.
+   */
+  const retired = [];
+  {
+    const current = readManifest(profileDir);
+    const dependencies = { ...current.dependencies };
+    const selected = current.dsh?.profile?.bundles ?? [];
+    let touched = false;
+    for (const name of plan.retired) {
+      rmSync(join(profileDir, 'node_modules', name), { recursive: true, force: true });
+      retired.push(name);
+      if (Object.hasOwn(dependencies, name)) {
+        delete dependencies[name];
+        touched = true;
+      }
+    }
+    const kept = selected.filter((name) => !plan.retired.includes(name));
+    if (kept.length !== selected.length) touched = true;
+    if (touched) {
+      current.dependencies = dependencies;
+      current.dsh = { ...current.dsh, profile: { ...current.dsh?.profile, bundles: kept } };
+      writeManifest(profileDir, current);
+    }
+  }
+
+  /*
    * 1. Our own packages: **always rewritten**, generated locally, no package manager.
    *
    * Rewriting unconditionally (not only when the dependency is missing) is what
@@ -524,6 +623,7 @@ export function provisionProfile(home, profile, options = {}) {
     status: failures.length === 0 ? 'ok' : 'partial',
     installed: [...installed, ...added.map((entry) => entry.name)],
     refreshed,
+    retired,
     selected: select,
     failures,
   };
@@ -546,14 +646,14 @@ export function unprovisionProfile(home, profile, options = {}) {
   const manifest = readManifest(profileDir);
   if (manifest === undefined) return { profile, status: 'skipped', removed: [] };
   const plugins = options.plugins ?? PROFILE_PLUGINS;
-  const names = new Set([...plugins.map((plugin) => plugin.name), MARKETPLACE_PACKAGE]);
+  const names = new Set([...plugins.map((plugin) => plugin.name), ...REPLACED_PLUGINS, MARKETPLACE_PACKAGE]);
   const removed = [];
   const dependencies = { ...manifest.dependencies };
-  for (const plugin of plugins) {
-    rmSync(join(profileDir, 'node_modules', plugin.name), { recursive: true, force: true });
-    if (Object.hasOwn(dependencies, plugin.name)) {
-      delete dependencies[plugin.name];
-      removed.push(plugin.name);
+  for (const name of [...plugins.map((plugin) => plugin.name), ...REPLACED_PLUGINS]) {
+    rmSync(join(profileDir, 'node_modules', name), { recursive: true, force: true });
+    if (Object.hasOwn(dependencies, name)) {
+      delete dependencies[name];
+      removed.push(name);
     }
   }
   const bundles = (manifest.dsh?.profile?.bundles ?? []).filter((name) => !names.has(name));
