@@ -38,36 +38,42 @@
  *
  * ## Known blocker: `prepare:dsh` signs the runtime on every macOS build
  *
- * Preparation still terminates at Apple, so this script does not yet complete on
- * a runner without a certificate. `apps/desktop/scripts/prepare-dsh.ts:156`
- * guards its two signing stages with `process.platform === 'darwin'` alone — not
- * with any signing switch — so every macOS build signs the whole materialized
- * runtime:
+ * Preparation still terminates at Apple, so this script does not complete on a
+ * runner without an Apple-issued certificate.
+ * `apps/desktop/scripts/prepare-dsh.ts:156` guards its two signing stages with
+ * `process.platform === 'darwin'` alone — not with any signing switch — so every
+ * macOS build signs the whole materialized runtime and then verifies it:
  *
  * - `signMacOSRuntime` (`macos-runtime.ts:31`) reaches `signMacOSRuntimeCode`
- *   (`verify-macos-signature.mjs:117`), which requires `CSC_KEYCHAIN`
- *   (`:119`) and signs with `--sign <identity> --timestamp` (`:122-125`) —
- *   the timestamp request is a network call to Apple.
- * - With a `signature-cache` directory it builds a policy first
- *   (`macos-cache-policy.ts:36`), which runs `codesign --display` on
- *   `DSH_DESKTOP_MACOS_SIGNING_PROBE`; empty, that fails as
- *   `macOS signature cache: /usr/bin/codesign verification failed`.
+ *   (`verify-macos-signature.mjs:117`), which requires `CSC_KEYCHAIN` (`:119`)
+ *   and signs with `--sign <identity> --timestamp` (`:122-125`).
+ * - Verification then runs on every file (`macos-runtime.ts:57`), and
+ *   `assertMacOSRuntimeSignatureDetails` requires all of
+ *   `Authority=Developer ID Application: <name>` (`:16`),
+ *   `TeamIdentifier=<id>` (`:17`) and `Timestamp=<secure timestamp>` (`:33`).
  *
- * Upstream has no unsigned macOS route at all: `signPrimaryRuntime`
- * (`package-target.ts:421`) is `platform === 'win32'`, so the `sign:primary-runtime`
- * steps that would create the keychain and sign the probe never run for a mac
- * target. Editing `prepare-dsh.ts` is not an option — it is an upstream file
- * this fork does not modify (`git diff upstream/master` is empty for it).
+ * Upstream has no unsigned macOS route: `signPrimaryRuntime`
+ * (`package-target.ts:421`) is `platform === 'win32'`, so the
+ * `sign:primary-runtime` step that would create the keychain never runs for a
+ * mac target. `prepare-dsh.ts` is an upstream file this fork does not modify.
  *
- * Clearing this needs one of:
+ * A self-signed certificate was tried and is **not** a workaround. It can
+ * satisfy the first field by setting the CN to
+ * `Developer ID Application: <name>`, but the other two are properties of an
+ * Apple-issued certificate that nothing local can forge:
  *
- * - a real `Developer ID Application` certificate in `CSC_LINK` with
- *   `CSC_KEY_PASSWORD`, which also makes the result properly signed; or
- * - a self-signed certificate + ephemeral keychain that satisfies
- *   `--options runtime --timestamp` locally, which produces a signature that is
- *   valid on the build machine but still refused elsewhere.
+ * - `TeamIdentifier` comes from Apple's team assignment, not from a certificate
+ *   field a self-signed issuer controls.
+ * - `Timestamp` is a secure timestamp from Apple's timestamp authority, which
+ *   only countersigns genuine Developer ID signatures. `--timestamp=none` makes
+ *   `codesign` succeed but leaves the field absent, so verification fails
+ *   immediately afterwards.
  *
- * Neither is available here, so this is recorded rather than worked around.
+ * So the only path to a macOS artifact is a real `Developer ID Application`
+ * certificate in `CSC_LINK` with `CSC_KEY_PASSWORD` — which also makes the
+ * result properly signed. `platform/macos/self-signed-identity.sh` is kept
+ * because it is still the shortest way to produce the keychain-shaped
+ * environment for local experiments, but it does not unblock the build.
  *
  * @example
  *   node platform/package-macos.mjs --arm64
@@ -306,7 +312,8 @@ async function main() {
     preparation: preparation.map((args) => args.join(' ')),
     builder: `electron-builder --config ${stagedConfig} --mac --${arch}`,
     configuration: `${configSource} (substituted through NODE_OPTIONS --import)`,
-    signing: 'disabled (identity: null, forceCodeSigning: false, notarize: false)',
+    applicationSigning: 'disabled (identity: null, forceCodeSigning: false, notarize: false, dmg.sign: false)',
+    runtimeSigning: 'required by prepare:dsh on darwin; uses CSC_LINK/CSC_KEY_PASSWORD through upstream withMacOSSigningKeychain',
     output: buildPaths.unsignedArtifacts,
   };
   // Resolved before the plan is printed and before `--check` returns: the
@@ -324,7 +331,29 @@ async function main() {
   for (const [line, value] of Object.entries(plan)) process.stdout.write(`[platform] ${line}: ${value}\n`);
 
   const config = stageConfig();
-  const env = { ...process.env, ...hookEnvironment(config) };
+  const baseEnv = { ...process.env, ...hookEnvironment(config) };
+  // Preparation signs the materialized runtime on every macOS build whether or
+  // not the application will be signed (`prepare-dsh.ts:156`), and that needs
+  // `CSC_KEYCHAIN` plus a `DSH_DESKTOP_MACOS_SIGNING_PROBE` signed by the same
+  // certificate. Upstream's own helper builds both from `CSC_LINK` /
+  // `CSC_KEY_PASSWORD` (`macos-signing-keychain.mjs:48`), so it is reused here
+  // rather than reimplemented; `package-target.ts:369` wraps its mac work in it
+  // for the same reason. It deletes `CSC_LINK`/`CSC_KEY_PASSWORD` from the child
+  // environment, leaving only the keychain path.
+  const signing = releaseEnvironment.CSC_LINK === undefined || releaseEnvironment.CSC_KEY_PASSWORD === undefined
+    ? undefined
+    : await import(pathToFileURL(join(desktopDir, 'scripts', 'macos-signing-keychain.mjs')).href);
+  const withSigningKeychain = async (action) => {
+    if (signing === undefined) {
+      throw new Error('package-macos: CSC_LINK and CSC_KEY_PASSWORD are required; preparation signs the macOS runtime even though this configuration disables signing');
+    }
+    // A real certificate is required here, not merely a syntactically valid
+    // one: the verification below demands an Apple-issued team and timestamp
+    // (see the header). A self-signed p12 gets past `codesign` and then fails
+    // verification, which is the difference between this failing in seconds and
+    // failing after preparation has already built everything.
+    return signing.withMacOSSigningKeychain(releaseEnvironment, async (signingEnvironment) => action({ ...baseEnv, ...signingEnvironment }));
+  };
   let code = 0;
   try {
     // Upstream resets the landlock output before packing it
@@ -332,17 +361,22 @@ async function main() {
     // create its destination itself.
     rmSync(buildPaths.packedLandlock, { recursive: true, force: true });
     mkdirSync(buildPaths.packedLandlock, { recursive: true });
-    for (const args of preparation) {
-      code = await run('pnpm', args, env);
-      if (code !== 0) throw new Error(`package-macos: ${args.join(' ')} failed with ${code}`);
-    }
+    await withSigningKeychain(async (env) => {
+      for (const args of preparation) {
+        code = await run('pnpm', args, env);
+        if (code !== 0) throw new Error(`package-macos: ${args.join(' ')} failed with ${code}`);
+      }
+    });
+    // electron-builder runs outside the helper: this configuration signs nothing
+    // (`identity: null`, `forceCodeSigning: false`, `notarize: false`,
+    // `dmg.sign: false`), so it must not inherit a keychain to sign with.
     code = await run('pnpm', [
       'exec', 'electron-builder',
       '--config', config,
       '--mac', `--${arch}`,
       '--publish', 'never',
       '--config.directories.output', buildPaths.unsignedArtifacts,
-    ], env);
+    ], baseEnv);
   } finally {
     rmSync(config, { force: true });
   }

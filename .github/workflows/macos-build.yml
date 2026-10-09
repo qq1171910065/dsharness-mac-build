@@ -83,6 +83,39 @@ jobs:
       - name: Print the packaging plan
         run: node platform/package-macos.mjs --${{ inputs.arch }} --check
 
+      - name: Create a throwaway signing identity
+        # Preparation signs the runtime on every macOS build regardless of
+        # whether the application is signed (`prepare-dsh.ts:156`). This step
+        # supplies the keychain-shaped environment it needs, but a self-signed
+        # certificate CANNOT satisfy the verification that follows: the build
+        # requires `TeamIdentifier` and a secure `Timestamp`
+        # (`verify-macos-signature.mjs:17,33`), and neither can be produced
+        # without an Apple-issued Developer ID. A real certificate is the only
+        # way through; this step narrows where the build stops. See
+        # platform/macos/self-signed-identity.sh.
+        #
+        # The paths are written into .env.macos rather than exported, because
+        # `loadDesktopPackageEnvironment` drops ambient `CSC_*`
+        # (`desktop-package-environment.mjs:19,57`) and reads it from the file.
+        id: identity
+        continue-on-error: true
+        env:
+          DSH_MACOS_CSC_LINK: ${{ runner.temp }}/dsh-local-signing.p12
+          DSH_MACOS_CSC_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if ! bash platform/macos/self-signed-identity.sh; then
+            echo "::warning::self-signed identity unavailable; macOS packaging cannot pass runtime verification without an Apple-issued Developer ID"
+            exit 0
+          fi
+          {
+            echo "CSC_LINK=${{ steps.identity.outputs.csc_link }}"
+            echo "CSC_KEY_PASSWORD=${{ steps.identity.outputs.csc_password }}"
+            echo "DSH_DESKTOP_MACOS_SIGNING_IDENTITY=${{ steps.identity.outputs.identity }}"
+            echo "DSH_DESKTOP_MACOS_TEAM_ID=0000000000"
+          } >> apps/desktop/.env.macos
+          echo "--- .env.macos keys ---"
+          cut -d= -f1 apps/desktop/.env.macos
+
       - name: Package the application
         env:
           # The Electron download otherwise goes to GitHub and can stall.

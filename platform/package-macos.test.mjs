@@ -200,6 +200,50 @@ test('package-macos: the preflight check asserts the same signing invariants as 
   assert.match(source, /CSC_LINK/u);
 });
 
+test('package-macos: preparation runs inside upstream\'s keychain context', () => {
+  const source = withoutComments(readFileSync(join(here, 'package-macos.mjs'), 'utf8'));
+  // `prepare:dsh` signs the runtime on every darwin build (`prepare-dsh.ts:156`),
+  // and that path needs `CSC_KEYCHAIN` and a `DSH_DESKTOP_MACOS_SIGNING_PROBE`
+  // signed by the same certificate. Upstream builds both from `CSC_LINK` /
+  // `CSC_KEY_PASSWORD` (`macos-signing-keychain.mjs:48`), and
+  // `package-target.ts:369` wraps its mac work in it for the same reason, so the
+  // helper is reused instead of reimplemented.
+  assert.match(source, /withMacOSSigningKeychain/u);
+  assert.match(source, /'macos-signing-keychain\.mjs'/u);
+  assert.match(source, /CSC_LINK/u);
+  assert.match(source, /CSC_KEY_PASSWORD/u);
+  // The preparation loop must be inside it; electron-builder must not be, since
+  // this configuration signs nothing and must not inherit a keychain.
+  const helper = source.indexOf('await withSigningKeychain(');
+  const builder = source.indexOf("'exec', 'electron-builder'");
+  const loop = source.indexOf('for (const args of preparation)');
+  assert.ok(helper >= 0 && loop > helper, 'preparation must run inside the keychain context');
+  assert.ok(builder > helper, 'electron-builder must run after it');
+  assert.ok(loop < builder, 'electron-builder must not be inside the preparation loop');
+
+  // A self-signed certificate is not a workaround, and the code must not imply
+  // it is. Verification requires fields only Apple can issue.
+  const verify = readFileSync(join(here, '..', 'apps', 'desktop', 'scripts', 'verify-macos-signature.mjs'), 'utf8');
+  assert.match(verify, /TeamIdentifier=/u, 'the team identifier requirement must still exist upstream');
+  assert.match(verify, /Timestamp=/u, 'the secure timestamp requirement must still exist upstream');
+  assert.doesNotMatch(verify, /allowUnsigned|skipTimestamp/u, 'upstream must still have no unsigned escape');
+});
+
+test('package-macos: the documented signing blocker stays accurate', () => {
+  const source = readFileSync(join(here, 'package-macos.mjs'), 'utf8');
+  // The header explains why an unsigned macOS build is impossible. If upstream
+  // ever gains an unsigned route, this text becomes wrong and should fail
+  // rather than silently mislead.
+  assert.match(source, /Known blocker/u);
+  assert.match(source, /TeamIdentifier/u);
+  assert.match(source, /secure timestamp/u);
+  assert.match(source, /self-signed certificate was tried and is \*\*not\*\* a workaround/u);
+  // The claim it depends on, checked against upstream rather than trusted.
+  const prepare = readFileSync(join(here, '..', 'apps', 'desktop', 'scripts', 'prepare-dsh.ts'), 'utf8');
+  assert.match(prepare, /if \(process\.platform === 'darwin'\) \{\n\s+await packagingStep\([^\n]*'sign:dsh-native'/u,
+    'prepare:dsh must still sign unconditionally on darwin');
+});
+
 test('package-macos: --check validates the configuration instead of only printing a plan', () => {
   const source = withoutComments(readFileSync(join(here, 'package-macos.mjs'), 'utf8'));
   // The plan is printed from an environment the configuration has already
