@@ -38,11 +38,19 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # `codesign` matches the full `Developer ID Application: <name>` string, and that
-# prefix is what makes macOS read the certificate as a code-signing identity.
-# Note the split: the certificate carries the prefix, while
-# `DSH_DESKTOP_MACOS_SIGNING_IDENTITY` must NOT
+# prefix is what macOS reads as the identity name. Note the split: the certificate
+# carries the prefix, while `DSH_DESKTOP_MACOS_SIGNING_IDENTITY` must NOT
 # (`desktop-release-environment.mjs:78-80` rejects the prefixed form).
 common_name="Developer ID Application: ${name}"
+
+# Apple marks a certificate as usable for code signing with its own extension
+# OID. `extendedKeyUsage=codeSigning` is the standard X.509 counterpart and is
+# NOT sufficient: without Apple's OID, Security.framework does not expose the
+# certificate through `find-identity -p codesigning`, and `codesign` then reports
+# "The specified item could not be found in the keychain" even though
+# `security import` succeeded. This is why the probe failed while every preceding
+# step reported success.
+APPLE_CODE_SIGNING_OID="1.2.840.113635.100.6.1.13"
 
 openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
   -keyout "$work/key.pem" -out "$work/cert.pem" \
@@ -50,7 +58,8 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
   -addext "basicConstraints=critical,CA:false" \
   -addext "keyUsage=critical,digitalSignature" \
   -addext "extendedKeyUsage=critical,codeSigning" \
-  -addext "subjectKeyIdentifier=hash" 2>/dev/null
+  -addext "subjectKeyIdentifier=hash" \
+  -addext "${APPLE_CODE_SIGNING_OID}=DER:05:00"
 
 # OpenSSL 3 writes a p12 that `security import` rejects unless -legacy is used
 # (the PKCS#12 MAC algorithm changed in 3.0).
@@ -91,6 +100,19 @@ security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password"
 security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
 cp /usr/bin/true "$work/probe"
+# Report exactly which command fails. `security import` succeeding is not
+# evidence that a usable identity exists, and the three candidate failures below
+# (identity not listed, identity not resolvable, signing rejected) have
+# different fixes. Without this the only visible line is the last error.
+report() {
+  echo "self-signed-identity: step failed: $*" >&2
+  echo "--- identities visible in the keychain ---" >&2
+  security find-identity -v -p codesigning "$keychain" >&2 || true
+  echo "--- all identities ---" >&2
+  security find-identity -v "$keychain" >&2 || true
+}
+trap 'report "$BASH_COMMAND" || true' ERR
+
 codesign --force --sign "$common_name" --keychain "$keychain" \
   --timestamp --options runtime "$work/probe"
 codesign --verify --strict "$work/probe"
