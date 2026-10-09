@@ -13,7 +13,12 @@
  * holds this fork's `client/` tree and nothing from upstream.
  *
  * The commit is built with a temporary index (`GIT_INDEX_FILE`), so the working
- * tree and the current branch are never modified.
+ * tree and the current branch are never modified. Its parent is local `HEAD`, and
+ * the publication branch is force-updated: that repository is a **target, never a
+ * source**. Basing the commit on the remote tip instead would create a second
+ * lineage that has to be merged back, and merging it back would commit
+ * `.github/workflows/macos-build.yml` into this fork -- reintroducing the very
+ * invariant violation this layout avoids.
  *
  * `--check` compares the mirror against the source and exits non-zero when they
  * differ, so drift is caught before a build runs a stale workflow.
@@ -126,7 +131,12 @@ const gitWithIndex = (...args) => execFileSync('git', args, {
 
 let pushed = false;
 try {
-  const base = git('rev-parse', `${remote}/main`);
+  // The parent is local HEAD, not the remote's tip. The publication repository is
+  // a target, never a source: basing the commit on `remote/main` would put the
+  // mirror commit on a separate lineage that has to be merged back, and merging it
+  // back would commit `.github/workflows/macos-build.yml` here -- reintroducing the
+  // exact invariant violation this layout exists to avoid (measured).
+  const base = git('rev-parse', 'HEAD');
   gitWithIndex('read-tree', base);
   gitWithIndex('add', '--force', MIRROR);
   const tree = gitWithIndex('write-tree');
@@ -134,9 +144,11 @@ try {
     'commit-tree', tree, '-p', base,
     '-m', 'ci: publish the macOS build workflow',
   ], { cwd: repo, encoding: 'utf8' }).trim();
-  process.stdout.write(`[publish-macos-workflow] prepared ${commit.slice(0, 10)} (mirrors platform/macos/workflow.yml)\n`);
+  process.stdout.write(`[publish-macos-workflow] prepared ${commit.slice(0, 10)} on top of ${base.slice(0, 10)}\n`);
   if (!dryRun) {
-    execFileSync('git', ['push', remote, `${commit}:main`, '--no-progress'], { cwd: repo, stdio: 'inherit' });
+    // `--force` because the publication branch is rebuilt from local HEAD each
+    // time; it is never merged back, so it has no history worth preserving.
+    execFileSync('git', ['push', '--force', remote, `${commit}:main`, '--no-progress'], { cwd: repo, stdio: 'inherit' });
     pushed = true;
     process.stdout.write(`[publish-macos-workflow] pushed to ${remote}/main\n`);
   }
