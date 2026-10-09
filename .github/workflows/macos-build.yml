@@ -1,0 +1,97 @@
+name: macOS build
+
+# Builds the DSH Desktop macOS application on a GitHub-hosted Apple Silicon
+# runner. A macOS application can only be packaged on macOS
+# (`apps/desktop/scripts/package-target.ts:182`), and this repository has no Mac,
+# so the runner is the build machine.
+#
+# No Apple credentials are configured, so the result is unsigned and
+# un-notarized. See `client/platform/package-macos.mjs` for what that means and
+# `client/platform/macos/electron-builder-config.mjs` for why upstream's own mac
+# entry point cannot be used here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Target architecture
+        type: choice
+        options: [arm64, x64]
+        default: arm64
+      version:
+        description: Build version recorded in the artifact name
+        type: string
+        default: 0.2.1-alpha.1.20261009.2
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    name: Package macOS ${{ inputs.arch }}
+    # macos-14 and later are Apple Silicon; the free plan only offers macOS
+    # runners to public repositories, which is why this one is public.
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the client fork
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        # The version comes from the repository's packageManager field; pinning
+        # it here as well would let the two drift.
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The workspace requires node ^22.19 || >=24.
+          node-version: 24
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Write the macOS release settings
+        # `desktop-package-environment.mjs:30` reads this file and throws without
+        # it, and its allowlist rejects anything that is not a platform setting,
+        # so the file must exist even though this build signs nothing.
+        run: |
+          cat > apps/desktop/.env.macos <<'EOF'
+          DSH_DESKTOP_APP_ID=com.czmanong.dsharness
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com
+          DSH_DESKTOP_MACOS_PACK_CONCURRENCY=4
+          EOF
+
+      - name: Print the packaging plan
+        run: node platform/package-macos.mjs --${{ inputs.arch }} --check
+
+      - name: Package the application
+        env:
+          # The Electron download otherwise goes to GitHub and can stall.
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+        run: node platform/package-macos.mjs --${{ inputs.arch }}
+
+      - name: Report what was produced
+        run: |
+          root="apps/desktop/.desktop-build/targets/mac-${{ inputs.arch }}/unsigned-artifacts"
+          echo "artifacts root: $root"
+          find "$root" -maxdepth 2 -print 2>/dev/null | head -50 || true
+          echo "--- signing state (expected: not signed) ---"
+          app="$root/mac-${{ inputs.arch }}/DeepSeek Harness.app"
+          if [ -d "$app" ]; then
+            codesign -dv "$app" 2>&1 || true
+            du -sh "$app"
+          else
+            echo "no .app at $app"
+          fi
+
+      - name: Upload the application
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-macos-${{ inputs.arch }}-unsigned
+          path: apps/desktop/.desktop-build/targets/mac-${{ inputs.arch }}/unsigned-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
