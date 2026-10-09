@@ -53,7 +53,7 @@ jobs:
         # it here as well would let the two drift.
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           # The workspace requires node ^22.19 || >=24.
           node-version: 24
