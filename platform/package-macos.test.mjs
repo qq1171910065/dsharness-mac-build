@@ -142,6 +142,42 @@ test('package-macos: preparation lists upstream steps and never a bare prepare:p
   assert.doesNotMatch(source, /'preflight:windows-signing'/u);
 });
 
+test('package-macos: the desktop-only preparation steps run from apps/desktop', () => {
+  const source = withoutComments(readFileSync(join(here, 'package-macos.mjs'), 'utf8'));
+  // `prepare:runtime`, `prepare:packages` and `prepare:dsh` are declared in
+  // apps/desktop/package.json, NOT the workspace root. Upstream reaches them
+  // with a cwd of `apps/desktop` (`package-target.ts:28` `APP_ROOT`), so a run
+  // from the root fails with `ERR_PNPM_NO_SCRIPT: Missing script:
+  // prepare:runtime` — which is exactly what CI reported.
+  for (const step of ['prepare:runtime', 'prepare:packages', 'prepare:dsh']) {
+    const escaped = step.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    assert.match(source, new RegExp(`desktop\\('run', '${escaped}'\\)`, 'u'),
+      `${step} must run through the apps/desktop directory helper`);
+    // ...and must not also be invoked bare, which is the failing form.
+    assert.doesNotMatch(source, new RegExp(`\\['run', '${escaped}'\\]`, 'u'));
+  }
+  // The helper must actually carry the directory, or the prefix is decorative.
+  assert.match(source, /const desktop = \(\.\.\.args\) => \['--dir', desktopPackageDir, \.\.\.args\]/u);
+  assert.match(source, /const desktopPackageDir = 'apps\/desktop'/u);
+  // `build:official` and `release:pack` really are workspace-root scripts, so
+  // they must stay unprefixed.
+  assert.match(source, /\['run', 'build:official'\]/u);
+  assert.match(source, /\['run', 'release:pack'/u);
+
+  // The claim above is checked against the manifests, not just the source text:
+  // if upstream ever moves these scripts, this fails instead of silently
+  // producing a build that dies ten minutes in.
+  const desktopManifest = JSON.parse(readFileSync(join(here, '..', 'apps', 'desktop', 'package.json'), 'utf8'));
+  const rootManifest = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
+  for (const step of ['prepare:runtime', 'prepare:packages', 'prepare:dsh']) {
+    assert.ok(step in desktopManifest.scripts, `${step} must exist in apps/desktop`);
+    assert.ok(!(step in rootManifest.scripts), `${step} must not be a workspace-root script`);
+  }
+  for (const step of ['build:official', 'release:pack']) {
+    assert.ok(step in rootManifest.scripts, `${step} must exist at the workspace root`);
+  }
+});
+
 test('package-macos: the preflight check asserts the same signing invariants as --check', () => {
   // No comment stripping: the file is assertions over an imported module, and
   // stripping would also remove the `//` inside module specifiers.

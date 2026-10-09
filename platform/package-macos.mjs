@@ -53,6 +53,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 const clientDir = resolve(here, '..');
 const desktopDir = join(clientDir, 'apps', 'desktop');
 
+/**
+ * The desktop package, relative to the workspace root.
+ *
+ * Used as a `pnpm --dir` argument rather than an absolute path so the command
+ * lines printed in the plan stay readable and portable.
+ */
+const desktopPackageDir = 'apps/desktop';
+
 /** The fork's electron-builder configuration, with signing and notarization off. */
 const configSource = join(here, 'macos', 'electron-builder-config.mjs');
 
@@ -90,12 +98,21 @@ const stagedConfig = join(desktopDir, '.desktop-build', 'macos-config.mjs');
  * it directly fails because it requires `--target` and `--output`
  * (`scripts/primary-runtime/prepare.ts:197`).
  *
+ * The last three steps are the desktop package's own scripts, not the
+ * workspace's, so each is prefixed with `--dir apps/desktop`. Upstream reaches
+ * them the same way — `execute()` runs with `cwd` set to `apps/desktop`
+ * (`package-target.ts:42`) — and running them from the workspace root fails with
+ * `ERR_PNPM_NO_SCRIPT: Missing script: prepare:runtime`, which is what CI
+ * reported. `build:official` and `release:pack` really are root scripts, so they
+ * stay unprefixed.
+ *
  * @param buildPaths - this target's build directories.
  * @returns the preparation commands, in order.
  */
 function preparationSteps(buildPaths) {
   const pack = (family, out) => ['run', 'release:pack', '--family', family, '--out', out];
   const packWorkspace = (dir, destination) => ['--dir', dir, 'pack', '--pack-destination', destination];
+  const desktop = (...args) => ['--dir', desktopPackageDir, ...args];
   return [
     ['run', 'build:official'],
     pack('dsh', buildPaths.packedDsh),
@@ -103,9 +120,9 @@ function preparationSteps(buildPaths) {
     pack('vendor', buildPaths.packedVendor),
     ['--dir', 'native/system', 'run', 'build:ts'],
     packWorkspace('native/system/packages/entry', buildPaths.packedLandlock),
-    ['run', 'prepare:runtime'],
-    ['run', 'prepare:packages'],
-    ['run', 'prepare:dsh'],
+    desktop('run', 'prepare:runtime'),
+    desktop('run', 'prepare:packages'),
+    desktop('run', 'prepare:dsh'),
   ];
 }
 
