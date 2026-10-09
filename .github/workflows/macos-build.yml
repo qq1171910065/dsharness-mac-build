@@ -169,7 +169,7 @@ jobs:
           fi
 
       - name: Upload the application
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dsh-desktop-macos-${{ inputs.arch }}-unsigned
           path: apps/desktop/.desktop-build/targets/mac-${{ inputs.arch }}/unsigned-artifacts/**
