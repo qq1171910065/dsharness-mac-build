@@ -34,8 +34,9 @@ const desktopDir = join(clientDir, 'apps', 'desktop');
 /**
  * The release settings the workflow writes into `apps/desktop/.env.macos`.
  *
- * Duplicated from `.github/workflows/macos-build.yml` on purpose: if the two
- * drift, this check passes while CI fails, so the workflow is what must stay
+ * Duplicated from `platform/macos/workflow.yml` (mirrored to
+ * `.github/workflows/macos-build.yml` in the build repository) on purpose: if the
+ * two drift, this check passes while CI fails, so the workflow is what must stay
  * authoritative. Keeping the values here in the open makes a drift visible in
  * review rather than only in a failed build.
  */

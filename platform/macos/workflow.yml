@@ -1,14 +1,23 @@
 name: macOS build
 
+# SOURCE OF TRUTH for the macOS packaging workflow. It lives under `platform/`
+# because every fork-owned change must (`platform/verify-fork-update.mjs` checks
+# `owned changes live under platform/`), while GitHub Actions reads workflows only
+# from `.github/workflows/`. `platform/publish-macos-workflow.mjs` mirrors this
+# file into `.github/workflows/macos-build.yml` in the publication repository,
+# which holds this fork's `client/` tree and nothing from upstream. Edit this file,
+# never the mirror; `--check` reports drift.
+#
 # Builds the DSH Desktop macOS application on a GitHub-hosted Apple Silicon
 # runner. A macOS application can only be packaged on macOS
 # (`apps/desktop/scripts/package-target.ts:182`), and this repository has no Mac,
 # so the runner is the build machine.
 #
-# No Apple credentials are configured, so the result is unsigned and
-# un-notarized. See `client/platform/package-macos.mjs` for what that means and
-# `client/platform/macos/electron-builder-config.mjs` for why upstream's own mac
-# entry point cannot be used here.
+# A macOS artifact cannot be produced without an Apple-issued Developer ID
+# certificate: see `client/platform/package-macos.mjs` for the requirement and
+# `client/platform/macos/self-signed-identity.sh` for why a self-signed one is not
+# a substitute. The workflow stops early with a clear error instead of building
+# for twenty minutes first.
 
 on:
   workflow_dispatch:

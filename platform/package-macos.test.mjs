@@ -17,7 +17,7 @@
 
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -28,7 +28,7 @@ const here = dirname(fileURLToPath(import.meta.url));
  *
  * The configuration evaluates its environment at import time, so anything
  * importing it — the test included — must arrange these first. This mirrors
- * `.github/workflows/macos-build.yml`; `platform/check-macos-config.mjs` is the
+ * `platform/macos/workflow.yml`; `platform/check-macos-config.mjs` is the
  * runnable form of the same check.
  */
 const RELEASE_SETTINGS = {
@@ -242,6 +242,51 @@ test('package-macos: the documented signing blocker stays accurate', () => {
   const prepare = readFileSync(join(here, '..', 'apps', 'desktop', 'scripts', 'prepare-dsh.ts'), 'utf8');
   assert.match(prepare, /if \(process\.platform === 'darwin'\) \{\n\s+await packagingStep\([^\n]*'sign:dsh-native'/u,
     'prepare:dsh must still sign unconditionally on darwin');
+});
+
+test('package-macos: the workflow is owned under platform/, never in .github', () => {
+  // `platform/verify-fork-update.mjs` requires every fork-owned change to live
+  // under `platform/`. A workflow committed to `.github/workflows/` would be the
+  // one owned file outside it, and `upstream/.github/workflows/` is a busy
+  // directory. GitHub Actions reads only `.github/workflows/`, so the workflow is
+  // stored here and mirrored into the publication repository instead.
+  const workflow = join(here, 'macos', 'workflow.yml');
+  assert.ok(existsSync(workflow), 'platform/macos/workflow.yml must hold the workflow source');
+  assert.ok(!existsSync(join(here, '..', '.github', 'workflows', 'macos-build.yml')),
+    'the workflow must not be committed at .github/workflows/macos-build.yml');
+  const source = readFileSync(workflow, 'utf8');
+  assert.match(source, /name: macOS build/u);
+  assert.match(source, /workflow_dispatch/u);
+  assert.match(source, /runs-on: macos-/u);
+  // The mirror script must exist and target the publication repository path.
+  const publish = readFileSync(join(here, 'publish-macos-workflow.mjs'), 'utf8');
+  assert.match(publish, /\.github\/workflows\/macos-build\.yml/u);
+  assert.match(publish, /verify-fork-update/u);
+});
+
+test('package-macos: the workflow runs the whole chain the entry point expects', () => {
+  const source = readFileSync(join(here, 'macos', 'workflow.yml'), 'utf8');
+  // Each step is load-bearing: a missing one turns a specific failure into a
+  // confusing one further along, which is what the earlier CI rounds cost.
+  for (const step of [
+    'platform/check-macos-config.mjs',          // settings resolve before the build
+    'platform/package-macos.test.mjs',          // these tests
+    'platform/package-macos.mjs --${{ inputs.arch }} --check', // plan, no build
+    'platform/macos/self-signed-identity.sh',   // signing identity
+    'platform/package-macos.mjs --${{ inputs.arch }}',         // the build
+  ]) {
+    assert.ok(source.includes(step), `the workflow must run ${step}`);
+  }
+  // The Electron download otherwise goes to GitHub and can stall indefinitely.
+  assert.match(source, /ELECTRON_MIRROR: https:\/\/npmmirror\.com\/mirrors\/electron\//u);
+  // `brew install` takes minutes; inside the signing step it is indistinguishable
+  // from a hang there, which cost two CI rounds. Compare the step commands, not
+  // the first mention in a comment (the header names the script too).
+  const brewIndex = source.indexOf('run: brew install coreutils');
+  const identityIndex = source.indexOf('if ! bash platform/macos/self-signed-identity.sh');
+  assert.ok(brewIndex >= 0, 'coreutils must be installed by the workflow');
+  assert.ok(identityIndex >= 0, 'the signing identity step must run the script');
+  assert.ok(brewIndex < identityIndex, 'coreutils must install in its own earlier step');
 });
 
 test('package-macos: --check validates the configuration instead of only printing a plan', () => {
