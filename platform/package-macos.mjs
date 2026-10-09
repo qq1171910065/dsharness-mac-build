@@ -34,9 +34,40 @@
  * once Gatekeeper is satisfied (right-click → Open, or `xattr -dr
  * com.apple.quarantine`). A downloaded copy on another machine is refused by
  * Gatekeeper, and there is no supported way to hand it to a user: that needs a
- * paid Apple Developer account. `.env.macos` is still required, and so are
- * placeholder signing settings, because the preparation stages validate the
- * release environment whether or not the result will be signed.
+ * paid Apple Developer account.
+ *
+ * ## Known blocker: `prepare:dsh` signs the runtime on every macOS build
+ *
+ * Preparation still terminates at Apple, so this script does not yet complete on
+ * a runner without a certificate. `apps/desktop/scripts/prepare-dsh.ts:156`
+ * guards its two signing stages with `process.platform === 'darwin'` alone — not
+ * with any signing switch — so every macOS build signs the whole materialized
+ * runtime:
+ *
+ * - `signMacOSRuntime` (`macos-runtime.ts:31`) reaches `signMacOSRuntimeCode`
+ *   (`verify-macos-signature.mjs:117`), which requires `CSC_KEYCHAIN`
+ *   (`:119`) and signs with `--sign <identity> --timestamp` (`:122-125`) —
+ *   the timestamp request is a network call to Apple.
+ * - With a `signature-cache` directory it builds a policy first
+ *   (`macos-cache-policy.ts:36`), which runs `codesign --display` on
+ *   `DSH_DESKTOP_MACOS_SIGNING_PROBE`; empty, that fails as
+ *   `macOS signature cache: /usr/bin/codesign verification failed`.
+ *
+ * Upstream has no unsigned macOS route at all: `signPrimaryRuntime`
+ * (`package-target.ts:421`) is `platform === 'win32'`, so the `sign:primary-runtime`
+ * steps that would create the keychain and sign the probe never run for a mac
+ * target. Editing `prepare-dsh.ts` is not an option — it is an upstream file
+ * this fork does not modify (`git diff upstream/master` is empty for it).
+ *
+ * Clearing this needs one of:
+ *
+ * - a real `Developer ID Application` certificate in `CSC_LINK` with
+ *   `CSC_KEY_PASSWORD`, which also makes the result properly signed; or
+ * - a self-signed certificate + ephemeral keychain that satisfies
+ *   `--options runtime --timestamp` locally, which produces a signature that is
+ *   valid on the build machine but still refused elsewhere.
+ *
+ * Neither is available here, so this is recorded rather than worked around.
  *
  * @example
  *   node platform/package-macos.mjs --arm64
