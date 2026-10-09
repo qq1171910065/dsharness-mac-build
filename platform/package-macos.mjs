@@ -48,7 +48,6 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { desktopTargetBuildPaths } from '../apps/desktop/scripts/desktop-build-paths.mjs';
-import { PLACEHOLDER_SIGNING } from './macos/electron-builder-config.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const clientDir = resolve(here, '..');
@@ -133,6 +132,37 @@ async function loadReleaseEnvironment() {
 }
 
 /**
+ * Resolve this product's configuration after the release environment is in place.
+ *
+ * The configuration module must be **imported dynamically and only after**
+ * `loadReleaseEnvironment` has run. It publishes a default export, so importing
+ * it evaluates `createUnsignedMacOSConfig()` — and therefore the whole upstream
+ * release environment — at module load. A static import at the top of this file
+ * would run before `main()` can do anything, and fail with
+ * `DSH_DESKTOP_APP_ID must be set to a non-empty value`. That is exactly how the
+ * configuration check failed in CI, so the ordering is pinned by a test.
+ *
+ * The placeholders are applied here rather than by the caller so both the
+ * validation path and the build path get the same environment.
+ *
+ * @param targetArch - architecture being packaged.
+ * @param releaseEnvironment - file-owned release settings.
+ * @returns upstream's configuration, with signing and notarization disabled.
+ */
+async function resolveConfiguration(targetArch, releaseEnvironment) {
+  Object.assign(process.env, releaseEnvironment, {
+    // The configuration selects its platform from this pair
+    // (`electron-builder-config.mjs:55-57`), and the arch it must package is not
+    // necessarily this host's.
+    DSH_DESKTOP_TARGET_PLATFORM: 'darwin',
+    DSH_DESKTOP_TARGET_ARCH: targetArch,
+  });
+  const module = await import(pathToFileURL(configSource).href);
+  Object.assign(process.env, module.PLACEHOLDER_SIGNING);
+  return module;
+}
+
+/**
  * The preload every child Node process receives, with the sentinels the hook reads.
  * @param config - absolute path of the staged electron-builder configuration.
  * @returns the environment additions for the packaging child.
@@ -164,6 +194,21 @@ export function stageConfig() {
     '',
   ].join('\n'), 'utf8');
   return stagedConfig;
+}
+
+/**
+ * Assert a configuration cannot sign or notarize.
+ *
+ * Exported so the standalone preflight (`check-macos-config.mjs`) enforces the
+ * same three fields through the same code, rather than restating them.
+ *
+ * @param config - a resolved electron-builder configuration.
+ * @returns void; throws when the configuration would contact Apple.
+ */
+export function assertUnsigned(config) {
+  if (config.mac?.identity !== null) throw new Error('package-macos: mac.identity must be null');
+  if (config.mac?.forceCodeSigning !== false) throw new Error('package-macos: mac.forceCodeSigning must be false');
+  if (config.mac?.notarize !== false) throw new Error('package-macos: mac.notarize must be false');
 }
 
 /**
@@ -211,24 +256,22 @@ async function main() {
     signing: 'disabled (identity: null, forceCodeSigning: false, notarize: false)',
     output: buildPaths.unsignedArtifacts,
   };
+  // Resolved before the plan is printed and before `--check` returns: the
+  // configuration evaluates its whole release environment when it is imported,
+  // so a `--check` that returned first would report a plan it never validated.
+  const releaseEnvironment = await loadReleaseEnvironment();
+  const configuration = await resolveConfiguration(arch, releaseEnvironment);
   if (check) {
-    process.stdout.write(`${JSON.stringify(plan, undefined, 2)}\n`);
+    // Importing the configuration is the check: it throws on any missing or
+    // malformed release setting, which is the failure this step exists to catch.
+    assertUnsigned(configuration.createUnsignedMacOSConfig());
+    process.stdout.write(`${JSON.stringify({ ...plan, validated: 'configuration resolves with signing disabled' }, undefined, 2)}\n`);
     return;
   }
   for (const [line, value] of Object.entries(plan)) process.stdout.write(`[platform] ${line}: ${value}\n`);
 
   const config = stageConfig();
-  const releaseEnvironment = await loadReleaseEnvironment();
-  const env = {
-    ...releaseEnvironment,
-    ...PLACEHOLDER_SIGNING,
-    // The configuration selects its platform from this pair
-    // (`electron-builder-config.mjs:55-57`), and the arch it must package is not
-    // necessarily this host's.
-    DSH_DESKTOP_TARGET_PLATFORM: 'darwin',
-    DSH_DESKTOP_TARGET_ARCH: arch,
-    ...hookEnvironment(config),
-  };
+  const env = { ...process.env, ...hookEnvironment(config) };
   let code = 0;
   try {
     // Upstream resets the landlock output before packing it

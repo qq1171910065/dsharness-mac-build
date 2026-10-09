@@ -138,16 +138,15 @@ test('package-macos: preparation lists upstream steps and never a bare prepare:p
   assert.doesNotMatch(source, /'preflight:windows-signing'/u);
 });
 
-test('package-macos: the preflight check asserts the same signing invariants CI does', () => {
+test('package-macos: the preflight check asserts the same signing invariants as --check', () => {
   // No comment stripping: the file is assertions over an imported module, and
   // stripping would also remove the `//` inside module specifiers.
   const source = readFileSync(join(here, 'check-macos-config.mjs'), 'utf8');
-  assert.match(source, /identity,\s*null/u);
-  assert.match(source, /forceCodeSigning,\s*false/u);
-  assert.match(source, /notarize,\s*false/u);
+  // It must go through the same assertion the build's own `--check` uses, so the
+  // two cannot disagree about what "unsigned" means.
+  assert.match(source, /assertUnsigned/u);
   // It must build the configuration from the same module the build uses, or it
-  // would validate something the build never loads. The path is joined from
-  // separate segments, so both parts are asserted rather than one whole path.
+  // would validate something the build never loads.
   assert.match(source, /'macos'/u);
   assert.match(source, /'electron-builder-config\.mjs'/u);
   assert.match(source, /createUnsignedMacOSConfig/u);
@@ -157,4 +156,26 @@ test('package-macos: the preflight check asserts the same signing invariants CI 
   const imported = source.indexOf('await import(');
   assert.ok(assigned >= 0 && imported >= 0 && assigned < imported,
     'the release settings must be set before the configuration is imported');
+  // Real credentials must not be able to re-enable signing.
+  assert.match(source, /CSC_LINK/u);
+});
+
+test('package-macos: --check validates the configuration instead of only printing a plan', () => {
+  const source = withoutComments(readFileSync(join(here, 'package-macos.mjs'), 'utf8'));
+  // The plan is printed from an environment the configuration has already
+  // resolved. A `--check` that returned earlier reported a plan whose settings
+  // had never been validated, and failed in CI with a bare
+  // "DSH_DESKTOP_APP_ID must be set".
+  const loaded = source.indexOf('await loadReleaseEnvironment()');
+  const checked = source.indexOf('if (check)');
+  assert.ok(loaded >= 0 && checked >= 0 && loaded < checked,
+    'the release environment must be loaded before the --check branch');
+  assert.match(source, /assertUnsigned\(/u);
+  // The configuration must NOT be imported statically. It publishes a default
+  // export, so a static import evaluates the whole release environment at module
+  // load — before main() can read .env.macos — and CI failed exactly that way.
+  assert.doesNotMatch(source, /^import .*electron-builder-config\.mjs/mu);
+  const resolved = source.indexOf('await resolveConfiguration(');
+  assert.ok(resolved >= 0 && resolved < checked,
+    'the configuration must be resolved before the --check branch');
 });

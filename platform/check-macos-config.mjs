@@ -58,21 +58,19 @@ const SETTINGS = {
 Object.assign(process.env, SETTINGS);
 
 const { createUnsignedMacOSConfig, PLACEHOLDER_SIGNING } = await import(pathToFileURL(join(here, 'macos', 'electron-builder-config.mjs')).href);
+const { assertUnsigned } = await import(pathToFileURL(join(here, 'package-macos.mjs')).href);
 const config = createUnsignedMacOSConfig();
 
-assert.equal(config.mac.identity, null, 'mac.identity must be null so no certificate is looked up');
-assert.equal(config.mac.forceCodeSigning, false, 'mac.forceCodeSigning must be false so no signature is produced');
-assert.equal(config.mac.notarize, false, 'mac.notarize must be false so Apple is never contacted');
+// The same three fields `package-macos.mjs --check` asserts, through the same
+// function, so the two checks cannot disagree about what "unsigned" means.
+assertUnsigned(config);
 assert.deepEqual(config.mac.target, ['dmg', 'zip'], 'the mac targets come from upstream and must not change here');
 assert.equal(typeof config.appId, 'string', 'the configuration must come from upstream, not be hand-built');
 assert.ok(config.mac.icon.length > 0, 'upstream mac settings must survive the override');
 // The factory must ignore real credentials rather than let them re-enable
 // signing: that is the failure the placeholders exist to prevent.
-const withCredentials = createUnsignedMacOSConfig({ ...process.env, CSC_LINK: '/some/real/certificate.p12' });
-assert.equal(withCredentials.mac.forceCodeSigning, false, 'a real certificate must not re-enable signing');
-assert.equal(withCredentials.mac.identity, null, 'a real certificate must not be selected as the identity');
-// The preparation entry point must use these same placeholders rather than its
-// own copy, or the two could drift apart and only one would be updated.
+assertUnsigned(createUnsignedMacOSConfig({ ...process.env, CSC_LINK: '/real/certificate.p12' }));
+// The entry point must reuse these placeholders rather than keep its own copy.
 const entry = readFileSync(join(here, 'package-macos.mjs'), 'utf8');
 assert.match(entry, /PLACEHOLDER_SIGNING/u, 'the entry point must reuse the configuration\'s placeholders');
 assert.ok(Object.keys(PLACEHOLDER_SIGNING).length > 0, 'placeholder signing settings must not be empty');
