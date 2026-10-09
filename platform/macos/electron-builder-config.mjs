@@ -1,10 +1,10 @@
 /**
  * electron-builder configuration for this product's macOS build.
  *
- * Upstream owns `apps/desktop/electron-builder.config.mjs`, so this file is the
- * fork's own entry point: it loads the upstream config and turns off code
- * signing and notarization, leaving every other decision (files, asarUnpack,
- * runtime staging, artifact naming) to the code upstream maintains.
+ * Upstream owns `apps/desktop/scripts/electron-builder-config.mjs`, so this file
+ * is the fork's own entry point: it builds the upstream configuration and turns
+ * off code signing and notarization, leaving every other decision (files,
+ * asarUnpack, runtime staging, artifact naming) to the code upstream maintains.
  *
  * ## Why signing is off, and what that costs
  *
@@ -22,48 +22,78 @@
  * verified" for a downloaded copy, and an unsigned bundle is not notarized, so
  * there is no way around that short of obtaining the account.
  *
- * ## Why not `--config.mac.notarize=false` on the command line
+ * ## Why the factory rather than upstream's default export
  *
- * Upstream already passes that switch for its own intermediate stages
- * (`package-target.ts:277,479,490`), but it is not sufficient on its own: the
- * release environment is resolved *before* electron-builder starts, in this
- * repo's own process, and `resolveMacOSSigningEnvironment` throws when
- * `DSH_DESKTOP_MACOS_SIGNING_IDENTITY` is unset
- * (`desktop-release-environment.mjs:77`). Two independent things have to be
- * satisfied — the environment check, and the builder options — and only the
- * second is reachable from the command line.
+ * `apps/desktop/electron-builder.config.mjs` evaluates
+ * `createElectronBuilderConfig()` at import time, and that function resolves
+ * every release setting immediately — including
+ * `resolveMacOSNotarizationEnvironment`, which throws whenever no Apple strategy
+ * is configured (`electron-builder-config.mjs:67`,
+ * `desktop-release-environment.mjs:120`). Importing it therefore fails before
+ * this file can override anything.
  *
- * So the packaging entry point (`package-macos.mjs`) supplies placeholder
- * environment values to get past validation, and this module overrides the two
- * builder options that would otherwise try to use them. The placeholders are
- * never used for signing because `forceCodeSigning` is false and `identity` is
- * null; if that ever stops being true the build fails loudly instead of
- * producing a bundle signed with a meaningless identity.
+ * The factory is exported separately, so it is called here with an environment
+ * carrying placeholder notary credentials purely to satisfy that lookup.
+ * Nothing downstream uses them: the `mac` block below replaces `identity`,
+ * `forceCodeSigning` and `notarize`, so electron-builder never asks for a
+ * certificate and never contacts Apple. Only those three fields decide that, and
+ * `platform/package-macos.test.mjs` asserts they cannot change silently.
  */
 
-import upstream from '../../apps/desktop/electron-builder.config.mjs';
+import { createElectronBuilderConfig } from '../../apps/desktop/scripts/electron-builder-config.mjs';
 
 /**
- * Platform-specific settings for a build with no Apple credentials.
+ * Placeholder signing settings the release environment insists on.
  *
- * `identity: null` disables the certificate lookup entirely; `notarize: false`
- * stops the notary submission. `hardenedRuntime` and `entitlements` are left as
- * upstream sets them — they describe the runtime the application expects, and
- * an unsigned build simply does not get the signature that would enforce them.
+ * Two independent validations stand between an unsigned build and this file, and
+ * both must be satisfied or the build never starts:
+ *
+ * - `resolveMacOSSigningEnvironment` requires a certificate qualifier and a
+ *   10-character team id (`desktop-release-environment.mjs:76-86`).
+ * - `resolveMacOSNotarizationEnvironment` requires one complete Apple strategy,
+ *   and the App Store Connect key is used because it is a plain path string that
+ *   is never stat'ed (`:93-120`).
+ *
+ * None of these values is used. They exist so resolution completes, and the
+ * `mac` override below is what stops electron-builder from acting on them.
  */
-const mac = {
-  ...(upstream.mac ?? {}),
-  identity: null,
-  forceCodeSigning: false,
-  notarize: false,
+export const PLACEHOLDER_SIGNING = {
+  DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'DSH Desktop development build',
+  DSH_DESKTOP_MACOS_TEAM_ID: '0000000000',
 };
 
-/** The upstream configuration with signing and notarization disabled. */
-const config = {
-  ...upstream,
-  mac,
+/** Placeholder notary credentials; see `PLACEHOLDER_SIGNING`. */
+export const PLACEHOLDER_NOTARY = {
+  APPLE_API_KEY: '/nonexistent/placeholder-notary-key.p8',
+  APPLE_API_KEY_ID: 'PLACEHOLDER',
+  APPLE_API_ISSUER: '00000000-0000-0000-0000-000000000000',
 };
+
+/**
+ * Build the configuration for a build with no Apple credentials.
+ * @param env - Release environment, normally `process.env`.
+ * @param hostPlatform - Build-host platform, forwarded to upstream.
+ * @param hostArch - Build-host architecture, forwarded to upstream.
+ * @returns Upstream's configuration with signing and notarization disabled.
+ */
+export function createUnsignedMacOSConfig(env = process.env, hostPlatform = process.platform, hostArch = process.arch) {
+  const upstream = createElectronBuilderConfig(
+    { ...PLACEHOLDER_NOTARY, ...PLACEHOLDER_SIGNING, ...env },
+    hostPlatform,
+    hostArch,
+  );
+  return {
+    ...upstream,
+    mac: {
+      ...(upstream.mac ?? {}),
+      identity: null,
+      forceCodeSigning: false,
+      notarize: false,
+    },
+  };
+}
+
+/** The configuration for this process's environment. */
+const config = createUnsignedMacOSConfig();
 
 export default config;
-
-export { mac };

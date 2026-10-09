@@ -56,14 +56,29 @@ jobs:
       - name: Write the macOS release settings
         # `desktop-package-environment.mjs:30` reads this file and throws without
         # it, and its allowlist rejects anything that is not a platform setting,
-        # so the file must exist even though this build signs nothing.
+        # so the file must exist even though this build signs nothing. The
+        # update and policy origins are required by the configuration's own
+        # environment resolution (`electron-builder-config.mjs:54`).
         run: |
           cat > apps/desktop/.env.macos <<'EOF'
           DSH_DESKTOP_APP_ID=com.czmanong.dsharness
           DSH_DESKTOP_AUTO_UPDATE_ENV=test
           DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com
           DSH_DESKTOP_MACOS_PACK_CONCURRENCY=4
+          DOWNLOAD_TEST_ORIGIN=https://www.czmanong.com
+          DOWNLOAD_TEST_RELEASE_ID=0123456789abcdef0123456789abcdef
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://www.czmanong.com
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://www.czmanong.com"]}
           EOF
+
+      - name: Check the packaging configuration resolves
+        # Fails here rather than minutes into the build if a required release
+        # setting is missing; the release environment resolves its settings one
+        # at a time, so without this each run would reveal only the next one.
+        run: node platform/check-macos-config.mjs
+
+      - name: Run the platform tests
+        run: node --test platform/package-macos.test.mjs
 
       - name: Print the packaging plan
         run: node platform/package-macos.mjs --${{ inputs.arch }} --check

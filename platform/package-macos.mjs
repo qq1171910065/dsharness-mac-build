@@ -47,6 +47,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { desktopTargetBuildPaths } from '../apps/desktop/scripts/desktop-build-paths.mjs';
+import { PLACEHOLDER_SIGNING } from './macos/electron-builder-config.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const clientDir = resolve(here, '..');
@@ -68,46 +70,79 @@ const hookModule = join(here, 'windows', 'nsis-config-hook.mjs');
 const stagedConfig = join(desktopDir, '.desktop-build', 'macos-config.mjs');
 
 /**
- * Preparation stages, in upstream's order (`package-target.ts:468-474`).
+ * Preparation, in upstream's exact order (`package-target.ts:450-474`).
  *
- * The two `sign:primary-runtime` steps upstream interleaves are omitted: they
- * exist to sign the primary runtime for a signed release, and this build signs
- * nothing. Everything that produces the runtime and the packaged `dsh` is kept,
- * because the application is not runnable without it.
+ * Every step here produces something the application needs, and the order is not
+ * interchangeable: the workspace has to be built before it can be packed, the
+ * packs have to exist before the runtime can install them, and the runtime has
+ * to be staged before electron-builder copies it into the bundle.
+ *
+ * Two upstream steps are intentionally absent:
+ *
+ * - `sign:primary-runtime` (twice, `:471`/`:474`) signs the primary runtime for
+ *   a signed release. This build signs nothing, so those are skipped; the
+ *   corresponding `--defer-primary-runtime-smoke` / `--defer-runtime-smoke`
+ *   flags exist to defer a smoke check until after signing, and are therefore
+ *   not passed either.
+ * - `preflight:windows-signing` (`:445`) is inside a `signPrimaryRuntime` guard.
+ *
+ * `prepare:primary-runtime` is *not* listed: it is a sub-step of
+ * `prepare:runtime` (`apps/desktop/scripts/prepare-runtime.ts:63`), and invoking
+ * it directly fails because it requires `--target` and `--output`
+ * (`scripts/primary-runtime/prepare.ts:197`).
+ *
+ * @param buildPaths - this target's build directories.
+ * @returns the preparation commands, in order.
  */
-const PREPARATION = [
-  ['run', 'prepare:primary-runtime'],
-  ['run', 'prepare:runtime'],
-  ['run', 'prepare:packages'],
-  ['run', 'prepare:dsh'],
-];
+function preparationSteps(buildPaths) {
+  const pack = (family, out) => ['run', 'release:pack', '--family', family, '--out', out];
+  const packWorkspace = (dir, destination) => ['--dir', dir, 'pack', '--pack-destination', destination];
+  return [
+    ['run', 'build:official'],
+    pack('dsh', buildPaths.packedDsh),
+    packWorkspace('apps/desktop-host', buildPaths.packedDsh),
+    pack('vendor', buildPaths.packedVendor),
+    ['--dir', 'native/system', 'run', 'build:ts'],
+    packWorkspace('native/system/packages/entry', buildPaths.packedLandlock),
+    ['run', 'prepare:runtime'],
+    ['run', 'prepare:packages'],
+    ['run', 'prepare:dsh'],
+  ];
+}
 
 /**
- * Placeholder values for the signing settings the release environment insists on.
+ * Read `apps/desktop/.env.macos` through upstream's own loader.
  *
- * These are deliberately not real credentials. They satisfy the presence and
- * format checks in `desktop-release-environment.mjs` so the preparation stages
- * run; they are never used to sign anything because the configuration this
- * script passes sets `identity: null`, `forceCodeSigning: false` and
- * `notarize: false`. If that stops being true the build fails at the first
- * signing attempt rather than silently producing a bundle with a false identity.
+ * The configuration module is evaluated by electron-builder in its own process,
+ * where it calls `createElectronBuilderConfig()` with no arguments
+ * (`apps/desktop/electron-builder.config.mjs`), so it reads `process.env` and
+ * never consults the dotenv file itself. Something has to put those settings
+ * into the environment first, and `loadDesktopPackageEnvironment` is the
+ * supported way: it also enforces the file's allowlist, so an unsupported
+ * setting fails here rather than mid-build.
+ *
+ * @returns the release environment, with ambient release settings filtered out.
  */
-const PLACEHOLDER_SIGNING = {
-  DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'DSH Desktop development build',
-  DSH_DESKTOP_MACOS_TEAM_ID: '0000000000',
-};
+async function loadReleaseEnvironment() {
+  const module = await import(pathToFileURL(join(desktopDir, 'scripts', 'desktop-package-environment.mjs')).href);
+  try {
+    return module.loadDesktopPackageEnvironment('darwin', process.env, desktopDir);
+  } catch (error) {
+    throw new Error(`package-macos: ${error.message}`);
+  }
+}
 
 /**
- * Parse this script's own arguments.
- * @param argv - arguments after the script name.
- * @returns the selected architecture and whether to only print the plan.
+ * The preload every child Node process receives, with the sentinels the hook reads.
+ * @param config - absolute path of the staged electron-builder configuration.
+ * @returns the environment additions for the packaging child.
  */
-export function parseArguments(argv) {
-  const arm64 = argv.includes('--arm64');
-  const x64 = argv.includes('--x64');
-  if (arm64 && x64) throw new Error('package-macos: --arm64 and --x64 are mutually exclusive');
-  if (!arm64 && !x64) throw new Error('package-macos: pass --arm64 or --x64');
-  return { arch: arm64 ? 'arm64' : 'x64', check: argv.includes('--check') };
+export function hookEnvironment(config) {
+  return {
+    NODE_OPTIONS: `--import ${pathToFileURL(hookModule).href}`,
+    DSHARNESS_NSIS_CONFIG_HOOK: '1',
+    DSHARNESS_NSIS_CONFIG: config,
+  };
 }
 
 /**
@@ -132,16 +167,16 @@ export function stageConfig() {
 }
 
 /**
- * The preload every child Node process receives, with the sentinels the hook reads.
- * @param config - absolute path of the staged electron-builder configuration.
- * @returns the environment additions for the packaging child.
+ * Parse this script's own arguments.
+ * @param argv - arguments after the script name.
+ * @returns the selected architecture and whether to only print the plan.
  */
-export function hookEnvironment(config) {
-  return {
-    NODE_OPTIONS: `--import ${pathToFileURL(hookModule).href}`,
-    DSHARNESS_NSIS_CONFIG_HOOK: '1',
-    DSHARNESS_NSIS_CONFIG: config,
-  };
+export function parseArguments(argv) {
+  const arm64 = argv.includes('--arm64');
+  const x64 = argv.includes('--x64');
+  if (arm64 && x64) throw new Error('package-macos: --arm64 and --x64 are mutually exclusive');
+  if (!arm64 && !x64) throw new Error('package-macos: pass --arm64 or --x64');
+  return { arch: arm64 ? 'arm64' : 'x64', check: argv.includes('--check') };
 }
 
 /**
@@ -166,14 +201,15 @@ async function main() {
   if (!existsSync(envFile)) {
     throw new Error(`package-macos: missing ${envFile}; copy .env.macos.example and fill in the local settings`);
   }
-  const outputRoot = join(desktopDir, '.desktop-build', 'targets', `mac-${arch}`, 'unsigned-artifacts');
+  const buildPaths = desktopTargetBuildPaths(`mac-${arch}`);
+  const preparation = preparationSteps(buildPaths);
   const plan = {
     upstream: 'apps/desktop/scripts/package-target.ts (NOT used: every mac path there signs or notarizes)',
-    preparation: PREPARATION.map((args) => args.join(' ')),
+    preparation: preparation.map((args) => args.join(' ')),
     builder: `electron-builder --config ${stagedConfig} --mac --${arch}`,
     configuration: `${configSource} (substituted through NODE_OPTIONS --import)`,
     signing: 'disabled (identity: null, forceCodeSigning: false, notarize: false)',
-    output: outputRoot,
+    output: buildPaths.unsignedArtifacts,
   };
   if (check) {
     process.stdout.write(`${JSON.stringify(plan, undefined, 2)}\n`);
@@ -182,10 +218,25 @@ async function main() {
   for (const [line, value] of Object.entries(plan)) process.stdout.write(`[platform] ${line}: ${value}\n`);
 
   const config = stageConfig();
-  const env = { ...process.env, ...PLACEHOLDER_SIGNING, ...hookEnvironment(config) };
+  const releaseEnvironment = await loadReleaseEnvironment();
+  const env = {
+    ...releaseEnvironment,
+    ...PLACEHOLDER_SIGNING,
+    // The configuration selects its platform from this pair
+    // (`electron-builder-config.mjs:55-57`), and the arch it must package is not
+    // necessarily this host's.
+    DSH_DESKTOP_TARGET_PLATFORM: 'darwin',
+    DSH_DESKTOP_TARGET_ARCH: arch,
+    ...hookEnvironment(config),
+  };
   let code = 0;
   try {
-    for (const args of PREPARATION) {
+    // Upstream resets the landlock output before packing it
+    // (`package-target.ts:460-461`); `git pack --pack-destination` does not
+    // create its destination itself.
+    rmSync(buildPaths.packedLandlock, { recursive: true, force: true });
+    mkdirSync(buildPaths.packedLandlock, { recursive: true });
+    for (const args of preparation) {
       code = await run('pnpm', args, env);
       if (code !== 0) throw new Error(`package-macos: ${args.join(' ')} failed with ${code}`);
     }
@@ -194,7 +245,7 @@ async function main() {
       '--config', config,
       '--mac', `--${arch}`,
       '--publish', 'never',
-      '--config.directories.output', outputRoot,
+      '--config.directories.output', buildPaths.unsignedArtifacts,
     ], env);
   } finally {
     rmSync(config, { force: true });
@@ -203,7 +254,7 @@ async function main() {
     process.exitCode = typeof code === 'number' ? code : 1;
     return;
   }
-  process.stdout.write(`[platform] application: ${outputRoot}\n`);
+  process.stdout.write(`[platform] application: ${buildPaths.unsignedArtifacts}\n`);
   process.stdout.write('[platform] WARNING: unsigned and not notarized; Gatekeeper will refuse this build on another machine\n');
 }
 

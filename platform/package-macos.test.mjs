@@ -19,8 +19,33 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { parseArguments } from './package-macos.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The release settings the build supplies before the configuration is imported.
+ *
+ * The configuration evaluates its environment at import time, so anything
+ * importing it — the test included — must arrange these first. This mirrors
+ * `.github/workflows/macos-build.yml`; `platform/check-macos-config.mjs` is the
+ * runnable form of the same check.
+ */
+const RELEASE_SETTINGS = {
+  DSH_DESKTOP_TARGET_PLATFORM: 'darwin',
+  DSH_DESKTOP_TARGET_ARCH: 'arm64',
+  DSH_DESKTOP_APP_ID: 'com.czmanong.dsharness',
+  DSH_DESKTOP_AUTO_UPDATE_ENV: 'test',
+  DOWNLOAD_TEST_ORIGIN: 'https://www.czmanong.com',
+  DOWNLOAD_TEST_RELEASE_ID: '0123456789abcdef0123456789abcdef',
+  DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://www.czmanong.com',
+  DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: '{"allowedAuthOrigins":["https://www.czmanong.com"]}',
+};
+
+// Set before the dynamic imports below. These modules resolve their environment
+// when they load, exactly as they do in the build's child processes.
+Object.assign(process.env, RELEASE_SETTINGS);
+const { parseArguments } = await import(pathToFileURL(join(here, 'package-macos.mjs')).href);
 
 /**
  * Strip comments so assertions read the configuration rather than its prose.
@@ -37,8 +62,6 @@ function withoutComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//gu, ' ').replace(/^\s*\/\/.*$/gmu, ' ');
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
-
 test('package-macos: --arm64 and --x64 are mutually exclusive and one is required', () => {
   assert.deepEqual(parseArguments(['--arm64']), { arch: 'arm64', check: false });
   assert.deepEqual(parseArguments(['--x64', '--check']), { arch: 'x64', check: true });
@@ -46,19 +69,38 @@ test('package-macos: --arm64 and --x64 are mutually exclusive and one is require
   assert.throws(() => parseArguments(['--arm64', '--x64']), /mutually exclusive/u);
 });
 
-test('package-macos: the shipped configuration disables signing and notarization', () => {
+test('package-macos: the built configuration disables signing and notarization', async () => {
+  // Behavioral, not textual: the real module is imported with the real release
+  // settings and the resulting configuration is inspected. This is what caught
+  // upstream's notarization lookup, which throws at import time unless a
+  // complete Apple strategy is present.
+  Object.assign(process.env, RELEASE_SETTINGS);
+  const module = await import(pathToFileURL(join(here, 'macos', 'electron-builder-config.mjs')).href);
+  const config = module.createUnsignedMacOSConfig();
+  assert.equal(config.mac.identity, null, 'no certificate must be looked up');
+  assert.equal(config.mac.forceCodeSigning, false, 'no signature must be produced');
+  assert.equal(config.mac.notarize, false, 'Apple must never be contacted');
+  assert.deepEqual(config.mac.target, ['dmg', 'zip'], 'the targets come from upstream');
+  assert.equal(typeof config.appId, 'string', 'the configuration must come from upstream');
+  assert.ok(config.mac.icon.length > 0, 'upstream mac settings must survive the override');
+  // Real credentials must not re-enable signing: that is the failure the
+  // placeholders exist to prevent, and it is the difference between a build that
+  // is quietly signed and one that is honestly unsigned.
+  const withCredentials = module.createUnsignedMacOSConfig({ ...process.env, CSC_LINK: '/real/cert.p12' });
+  assert.equal(withCredentials.mac.forceCodeSigning, false);
+  assert.equal(withCredentials.mac.identity, null);
+});
+
+test('package-macos: the configuration is composed from upstream, not restated', () => {
   const source = withoutComments(readFileSync(join(here, 'macos', 'electron-builder-config.mjs'), 'utf8'));
-  // Assert the three fields that decide whether Apple is contacted, and the
-  // values that keep it out of the build. `identity: null` is what stops the
-  // certificate lookup; the other two stop the signature and the notary.
-  assert.match(source, /\bidentity:\s*null\b/u);
-  assert.match(source, /\bforceCodeSigning:\s*false\b/u);
-  assert.match(source, /\bnotarize:\s*false\b/u);
+  // Upstream's default export resolves the release environment at import time
+  // and throws without Apple credentials, so the factory must be used instead.
+  assert.match(source, /createElectronBuilderConfig\s*\(/u);
+  assert.match(source, /from '\.\.\/\.\.\/apps\/desktop\/scripts\/electron-builder-config\.mjs'/u);
+  assert.doesNotMatch(source, /from '\.\.\/\.\.\/apps\/desktop\/electron-builder\.config\.mjs'/u);
+  // The forbidden values must not appear in code (the prose explains them).
   assert.doesNotMatch(source, /\bforceCodeSigning:\s*true\b/u);
   assert.doesNotMatch(source, /\bnotarize:\s*true\b/u);
-  // It must extend upstream rather than restate the whole configuration: a
-  // hand-copied config would silently miss every option upstream adds later.
-  assert.match(source, /from '\.\.\/\.\.\/apps\/desktop\/electron-builder\.config\.mjs'/u);
 });
 
 test('package-macos: the entry point never delegates to upstream mac packaging', () => {
@@ -73,4 +115,46 @@ test('package-macos: the entry point never delegates to upstream mac packaging',
   // that turn an obscure builder failure into a stated reason.
   assert.match(source, /process\.platform !== 'darwin'/u);
   assert.match(source, /\.env\.macos/u);
+});
+
+test('package-macos: preparation lists upstream steps and never a bare prepare:primary-runtime', () => {
+  const source = withoutComments(readFileSync(join(here, 'package-macos.mjs'), 'utf8'));
+  // `prepare:primary-runtime` is a sub-step of `prepare:runtime`
+  // (`prepare-runtime.ts:63`) and requires `--target`/`--output` when invoked
+  // directly (`scripts/primary-runtime/prepare.ts:197`). A CI run failed here
+  // before this list was corrected, so it is pinned.
+  assert.doesNotMatch(source, /'prepare:primary-runtime'/u);
+  const listed = (name) => new RegExp(`'${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}'`, 'u').test(source);
+  for (const step of ['build:official', 'release:pack', 'run', 'prepare:runtime', 'prepare:packages', 'prepare:dsh']) {
+    assert.ok(listed(step), `preparation must include ${step}`);
+  }
+  // The signing steps upstream interleaves must NOT be here: this build signs
+  // nothing, and the defer flags exist only to sequence those two steps. Both
+  // are checked in code, not prose — the comments above explain why they are
+  // absent, which is exactly the text a naive search would trip on.
+  assert.doesNotMatch(source, /'sign:primary-runtime'/u);
+  assert.doesNotMatch(source, /'--defer-primary-runtime-smoke'/u);
+  assert.doesNotMatch(source, /'--defer-runtime-smoke'/u);
+  assert.doesNotMatch(source, /'preflight:windows-signing'/u);
+});
+
+test('package-macos: the preflight check asserts the same signing invariants CI does', () => {
+  // No comment stripping: the file is assertions over an imported module, and
+  // stripping would also remove the `//` inside module specifiers.
+  const source = readFileSync(join(here, 'check-macos-config.mjs'), 'utf8');
+  assert.match(source, /identity,\s*null/u);
+  assert.match(source, /forceCodeSigning,\s*false/u);
+  assert.match(source, /notarize,\s*false/u);
+  // It must build the configuration from the same module the build uses, or it
+  // would validate something the build never loads. The path is joined from
+  // separate segments, so both parts are asserted rather than one whole path.
+  assert.match(source, /'macos'/u);
+  assert.match(source, /'electron-builder-config\.mjs'/u);
+  assert.match(source, /createUnsignedMacOSConfig/u);
+  // It must arrange the release settings before that import, because the
+  // configuration evaluates its environment when it loads.
+  const assigned = source.indexOf('Object.assign(process.env');
+  const imported = source.indexOf('await import(');
+  assert.ok(assigned >= 0 && imported >= 0 && assigned < imported,
+    'the release settings must be set before the configuration is imported');
 });
