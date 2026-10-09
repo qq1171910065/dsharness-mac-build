@@ -61,7 +61,7 @@ const { createUnsignedMacOSConfig, PLACEHOLDER_SIGNING } = await import(pathToFi
 const { assertUnsigned } = await import(pathToFileURL(join(here, 'package-macos.mjs')).href);
 const config = createUnsignedMacOSConfig();
 
-// The same three fields `package-macos.mjs --check` asserts, through the same
+// The same fields `package-macos.mjs --check` asserts, through the same
 // function, so the two checks cannot disagree about what "unsigned" means.
 assertUnsigned(config);
 assert.deepEqual(config.mac.target, ['dmg', 'zip'], 'the mac targets come from upstream and must not change here');

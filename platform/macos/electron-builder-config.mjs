@@ -35,8 +35,9 @@
  * The factory is exported separately, so it is called here with an environment
  * carrying placeholder notary credentials purely to satisfy that lookup.
  * Nothing downstream uses them: the `mac` block below replaces `identity`,
- * `forceCodeSigning` and `notarize`, so electron-builder never asks for a
- * certificate and never contacts Apple. Only those three fields decide that, and
+ * `forceCodeSigning` and `notarize`, and the `dmg` block clears its separate
+ * `sign` switch. electron-builder never asks for a certificate and never
+ * contacts Apple. Only those four fields decide that, and
  * `platform/package-macos.test.mjs` asserts they cannot change silently.
  */
 
@@ -89,6 +90,15 @@ export function createUnsignedMacOSConfig(env = process.env, hostPlatform = proc
       identity: null,
       forceCodeSigning: false,
       notarize: false,
+    },
+    // `dmg.sign` is a separate switch from `mac.forceCodeSigning`
+    // (`electron-builder-config.mjs:166-169`) and is `true` upstream. Leaving it
+    // set would have the DMG target ask for a signature this build cannot
+    // produce, which fails the disk-image step after the application itself has
+    // already been built correctly.
+    dmg: {
+      ...(upstream.dmg ?? {}),
+      sign: false,
     },
   };
 }

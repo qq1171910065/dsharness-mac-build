@@ -80,6 +80,9 @@ test('package-macos: the built configuration disables signing and notarization',
   assert.equal(config.mac.identity, null, 'no certificate must be looked up');
   assert.equal(config.mac.forceCodeSigning, false, 'no signature must be produced');
   assert.equal(config.mac.notarize, false, 'Apple must never be contacted');
+  // `dmg.sign` is a separate switch upstream; leaving it true fails the disk
+  // image after the application itself was built correctly.
+  assert.equal(config.dmg.sign, false, 'the disk image must not be signed either');
   assert.deepEqual(config.mac.target, ['dmg', 'zip'], 'the targets come from upstream');
   assert.equal(typeof config.appId, 'string', 'the configuration must come from upstream');
   assert.ok(config.mac.icon.length > 0, 'upstream mac settings must survive the override');
@@ -101,6 +104,7 @@ test('package-macos: the configuration is composed from upstream, not restated',
   // The forbidden values must not appear in code (the prose explains them).
   assert.doesNotMatch(source, /\bforceCodeSigning:\s*true\b/u);
   assert.doesNotMatch(source, /\bnotarize:\s*true\b/u);
+  assert.doesNotMatch(source, /\bsign:\s*true\b/u);
 });
 
 test('package-macos: the entry point never delegates to upstream mac packaging', () => {

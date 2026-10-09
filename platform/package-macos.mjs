@@ -200,7 +200,11 @@ export function stageConfig() {
  * Assert a configuration cannot sign or notarize.
  *
  * Exported so the standalone preflight (`check-macos-config.mjs`) enforces the
- * same three fields through the same code, rather than restating them.
+ * same fields through the same code, rather than restating them.
+ *
+ * `dmg.sign` is checked alongside the `mac` fields because it is a separate
+ * switch upstream: leaving it true fails the disk-image step after the
+ * application has already been built correctly.
  *
  * @param config - a resolved electron-builder configuration.
  * @returns void; throws when the configuration would contact Apple.
@@ -209,6 +213,7 @@ export function assertUnsigned(config) {
   if (config.mac?.identity !== null) throw new Error('package-macos: mac.identity must be null');
   if (config.mac?.forceCodeSigning !== false) throw new Error('package-macos: mac.forceCodeSigning must be false');
   if (config.mac?.notarize !== false) throw new Error('package-macos: mac.notarize must be false');
+  if (config.dmg?.sign !== false) throw new Error('package-macos: dmg.sign must be false');
 }
 
 /**
