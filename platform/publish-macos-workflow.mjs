@@ -26,6 +26,7 @@
  * Usage:
  *   node platform/publish-macos-workflow.mjs                 # mirror, then push
  *   node platform/publish-macos-workflow.mjs --check         # report drift only
+ *   node platform/publish-macos-workflow.mjs --rebuild       # re-push even if the mirror matches
  *   node platform/publish-macos-workflow.mjs --remote ghbuild
  *   node platform/publish-macos-workflow.mjs --dry-run       # build the commit, do not push
  */
@@ -45,6 +46,15 @@ const MIRROR = '.github/workflows/macos-build.yml';
 const argv = process.argv.slice(2);
 const checkOnly = argv.includes('--check');
 const dryRun = argv.includes('--dry-run');
+/**
+ * Rebuild the publication branch even when the mirrored file already matches.
+ *
+ * The mirror check answers "is the published workflow current", not "is the
+ * published tree current": after a code commit that does not touch the workflow,
+ * the mirror matches while the publication branch is missing that commit. The
+ * build would then run stale sources, so the branch is rebuilt from local `HEAD`.
+ */
+const rebuild = argv.includes('--rebuild');
 const remoteIndex = argv.indexOf('--remote');
 const remote = remoteIndex === -1 ? 'ghbuild' : argv[remoteIndex + 1];
 
@@ -97,7 +107,7 @@ catch {
   found = '';
 }
 
-if (found === wanted) {
+if (found === wanted && !rebuild) {
   process.stdout.write(`[publish-macos-workflow] ${remote}/main already matches platform/macos/workflow.yml (blob ${wanted.slice(0, 10)})\n`);
   process.exit(0);
 }
