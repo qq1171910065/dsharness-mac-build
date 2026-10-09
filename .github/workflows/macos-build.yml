@@ -83,6 +83,14 @@ jobs:
       - name: Print the packaging plan
         run: node platform/package-macos.mjs --${{ inputs.arch }} --check
 
+      - name: Install GNU coreutils
+        # Supplies `timeout`, which bounds the Apple timestamp request. It runs in
+        # its own step because `brew install` takes minutes: inside the signing
+        # step it was indistinguishable from a hang there (measured: the step sat
+        # at 20+ minutes twice with the installer as the only explanation left).
+        timeout-minutes: 10
+        run: brew install coreutils
+
       - name: Create a throwaway signing identity
         # Preparation signs the runtime on every macOS build regardless of
         # whether the application is signed (`prepare-dsh.ts:156`). This step
@@ -102,10 +110,6 @@ jobs:
           DSH_MACOS_CSC_LINK: ${{ runner.temp }}/dsh-local-signing.p12
           DSH_MACOS_CSC_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          # GNU coreutils provides `timeout`, which bounds the Apple timestamp
-          # request. Without it that request blocks until the job times out
-          # (measured: 20+ minutes with a SIGTERM watchdog that codesign ignored).
-          brew install coreutils || echo "::warning::coreutils unavailable; the signing step will refuse to run unbounded"
           if ! bash platform/macos/self-signed-identity.sh; then
             # Fail here, loudly. A previous revision warned and continued, which
             # appended an empty `CSC_LINK=` to .env.macos and turned this into a
