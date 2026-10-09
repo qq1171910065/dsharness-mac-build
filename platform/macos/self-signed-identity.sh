@@ -94,15 +94,30 @@ keychain_password="$(openssl rand -base64 32)"
 security create-keychain -p "$keychain_password" "$keychain"
 security set-keychain-settings "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
+# A self-signed certificate is its own root and macOS does not trust it, so it is
+# never exposed as a code-signing identity: `find-identity -v -p codesigning`
+# reports "0 valid identities found" and `codesign` then says "The specified item
+# could not be found in the keychain", even though `security import` succeeded and
+# the certificate carries the Apple code-signing OID. A real Developer ID needs
+# none of this because it chains to Apple's CA. Trust has to be granted to the
+# certificate file before the identity becomes usable.
+security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$work/cert.pem"
 security import "$link" -k "$keychain" -P "$password" \
-  -T /usr/bin/codesign -T /usr/bin/productbuild
+  -T /usr/bin/codesign -T /usr/bin/productbuild -A
 security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
 security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
 cp /usr/bin/true "$work/probe"
+# Assert the identity is actually registered before signing with it. This is the
+# check whose absence cost several runs: `security import` reporting success and
+# an identity existing are different facts.
+if ! security find-identity -v -p codesigning "$keychain" | grep -qF "$common_name"; then
+  echo "self-signed-identity: the certificate is not registered as a code-signing identity" >&2
+  security find-identity -v -p codesigning "$keychain" >&2 || true
+  exit 1
+fi
 # Report exactly which command fails. `security import` succeeding is not
-# evidence that a usable identity exists, and the three candidate failures below
-# (identity not listed, identity not resolvable, signing rejected) have
+# evidence that a usable identity exists, and the candidate failures below have
 # different fixes. Without this the only visible line is the last error.
 report() {
   echo "self-signed-identity: step failed: $*" >&2
