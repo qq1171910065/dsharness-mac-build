@@ -253,12 +253,40 @@ test('package-macos: the workflow is owned under platform/, never in .github', (
   // stored here and mirrored into the publication repository instead.
   const workflow = join(here, 'macos', 'workflow.yml');
   assert.ok(existsSync(workflow), 'platform/macos/workflow.yml must hold the workflow source');
-  assert.ok(!existsSync(join(here, '..', '.github', 'workflows', 'macos-build.yml')),
-    'the workflow must not be committed at .github/workflows/macos-build.yml');
   const source = readFileSync(workflow, 'utf8');
   assert.match(source, /name: macOS build/u);
   assert.match(source, /workflow_dispatch/u);
   assert.match(source, /runs-on: macos-/u);
+
+  // The mirror belongs to the publication repository, where it legitimately exists
+  // at `.github/workflows/macos-build.yml` because GitHub Actions reads only that
+  // path. It must not be committed to the fork. Distinguish the two by what the
+  // checkout is: the publication repository has the mirror and no `verify-fork-update`
+  // machinery of its own... which the fork does have, so presence of the fork's
+  // upstream remote is the reliable signal.
+  const inFork = (() => {
+    try {
+      execFileSync('git', ['remote', 'get-url', 'upstream'], { cwd: join(here, '..'), stdio: 'pipe' });
+      return true;
+    }
+    catch {
+      // No `upstream` remote: this is the publication repository.
+      return false;
+    }
+  })();
+  const mirrorPath = join(here, '..', '.github', 'workflows', 'macos-build.yml');
+  if (inFork) {
+    assert.ok(!existsSync(mirrorPath),
+      'the fork must not commit the workflow at .github/workflows/macos-build.yml');
+  }
+  else {
+    // In the publication repository the mirror must be present and current,
+    // because that is the file the build actually runs.
+    assert.ok(existsSync(mirrorPath),
+      'the publication repository must carry .github/workflows/macos-build.yml');
+    assert.equal(readFileSync(mirrorPath, 'utf8').replace(/\r\n/gu, '\n'), source.replace(/\r\n/gu, '\n'),
+      'the published mirror must match platform/macos/workflow.yml');
+  }
   // The mirror script must exist and target the publication repository path.
   const publish = readFileSync(join(here, 'publish-macos-workflow.mjs'), 'utf8');
   assert.match(publish, /\.github\/workflows\/macos-build\.yml/u);
