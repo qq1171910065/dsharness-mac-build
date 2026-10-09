@@ -193,7 +193,7 @@ function main() {
    * that write is the one thing a dry run does do.
    */
   process.stdout.write(`[platform] ${dryRun ? 'would write' : 'wrote'} ${target}\n`);
-  process.stdout.write('[platform] managed rows: deepseek-account (origin), llm-deepseek (disabled: no built-in DeepSeek card), llm-deepseek-account (disabled: its 401 signs the user out)\n');
+  process.stdout.write('[platform] managed rows: deepseek-account (origin), webserver (fixed port / optional LAN bind), llm-deepseek (disabled: no built-in DeepSeek card), llm-deepseek-account (disabled: its 401 signs the user out)\n');
   for (const line of describeReports(reports, dryRun)) process.stdout.write(`${line}\n`);
   process.stdout.write(`[platform] account origin: ${origin}\n`);
   process.stdout.write(
@@ -212,6 +212,28 @@ function main() {
       ? `configured (${token.length} chars)`
       : 'not set; the gateway plugin generates and stores one on first run and shows it at /dsharness/gateway'}\n`,
   );
+  /*
+   * The external-integration address, and the one line that has to be loud.
+   *
+   * The Desktop Host always launches with `--port 0`, so without these two the
+   * port changes on every restart and a caller that stored one address reports
+   * "service unreachable" (measured: sixai's dsh_instance rows still held :3080
+   * and :43127 from the previous shell). Printing the resolved values is what
+   * lets an operator copy the right address instead of guessing.
+   */
+  const gatewayHost = String(process.env.DSH_GATEWAY_HOST || '').trim();
+  const gatewayPort = String(process.env.DSH_GATEWAY_PORT || '').trim();
+  process.stdout.write(
+    `[platform] external access: host ${gatewayHost === '' ? '127.0.0.1 (loopback only)' : gatewayHost}`
+    + `, port ${gatewayPort === '' ? 'OS-assigned each launch (set DSH_GATEWAY_PORT to pin it)' : gatewayPort}\n`,
+  );
+  if (gatewayHost === '0.0.0.0') {
+    process.stdout.write(
+      '[platform] ⚠️ DSH_GATEWAY_HOST=0.0.0.0 binds all interfaces: everyone who can reach this machine'
+      + ' can call the full Harness API, including shell execution. Keep the shared secret strong and'
+      + ' treat the network as trusted. Leave it unset to stay loopback-only.\n',
+    );
+  }
 }
 
 // Only run when invoked directly; the exports above exist for the spec.

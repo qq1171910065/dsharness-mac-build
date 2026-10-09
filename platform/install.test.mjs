@@ -30,6 +30,25 @@ import { MARKETPLACE_PACKAGE, PROFILE_PLUGINS } from './provision.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Every file under a directory, recursively.
+ *
+ * Used to scan the client settings packages for a namespace owner. Skips
+ * `node_modules` and build output: neither is source, and both would make the
+ * scan slow and its failure modes confusing.
+ * @param dir - directory to walk.
+ * @returns absolute paths of the files found.
+ */
+function walk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      return ['node_modules', 'lib'].includes(entry.name) ? [] : walk(full);
+    }
+    return entry.isFile() ? [full] : [];
+  });
+}
+
 /** Provision with a runner that never shells out; these tests are about the patch file. */
 const noPnpm = { run: () => { throw new Error('these tests must not run pnpm'); } };
 
@@ -186,18 +205,57 @@ test('the shipped cordis.patch.yml carries no config for a page-writable row', (
       `${id} must not be addressed by this layer: a config here makes every 设置 › 模型 write throw`);
   }
   /*
-   * Every row with a `config:` block must be one whose own writer is not the models
-   * page: `deepseek-account` (the login surface's own row) and `llm-deepseek-account`
-   * (disabled with an explicitly emptied config). A `config:` for a models-page
-   * namespace is the lock this test exists to catch.
+   * Every row with a `config:` block must be one no settings page writes:
+   * `deepseek-account` (the login surface's own row), `llm-deepseek-account`
+   * (disabled with an explicitly emptied config), and `webserver` (the bind host
+   * and port, read from the environment — no client UI names that namespace; see
+   * the dedicated assertion below). A `config:` for a settings-page namespace is
+   * the lock this test exists to catch.
    */
   const configured = [...text.matchAll(/^- id: ([A-Za-z0-9-]+)\n((?:.*\n)*?)(?=\n- id: |\n#|$)/gmu)]
     .filter((match) => /^ {2}config:/mu.test(match[2]))
     .map((match) => match[1]);
-  assert.deepEqual(configured, ['deepseek-account', 'llm-deepseek-account'],
-    'only the account rows carry a config; anything else is a page-writable namespace being locked');
+  assert.deepEqual(configured, ['webserver', 'deepseek-account', 'llm-deepseek-account'],
+    'only rows whose namespace no settings page writes may carry a config; anything else is that namespace being locked');
   for (const id of configured) {
     assert.ok(!['llm-pi-ai', 'agent-default-model'].includes(id), `${id} must stay writable from 设置 › 模型`);
+  }
+});
+
+/**
+ * `webserver` is deliberately exempt from the allowlist above, because nothing
+ * writes that namespace: the bind host and port are read from the environment so
+ * an external integration can pin one address.
+ *
+ * This is the assertion that keeps the exemption honest. The namespace is only
+ * locked when a page *edits* it -- `config-editor.edit()` throws
+ * `Configuration for "<id>" is overridden by a home patch or command-line overlay`
+ * when the composed value is not the value being written
+ * (`config-editor/src/index.ts:136-141`), which is the `llm-pi-ai` bug. Merely
+ * importing the host type or listening to `webserver/index-inject` (which
+ * `ui-settings-account` does) is not an edit: that event injects HTML into the
+ * served index and never touches this row, so it is not a lock.
+ *
+ * If a settings page ever gains a real editor for these keys, failing here is the
+ * signal to move them into the profile layer the way {@link MODEL_CATALOG_ROWS} is.
+ */
+test('no client settings page edits the webserver namespace', () => {
+  const clientPackages = join(here, '..', 'packages', 'client');
+  const owners = readdirSync(clientPackages, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('ui-settings'))
+    .map((entry) => join(clientPackages, entry.name));
+  assert.ok(owners.length > 0, 'expected the client settings packages to exist, or this check proves nothing');
+  for (const dir of owners) {
+    const source = join(dir, 'src');
+    if (!existsSync(source)) continue;
+    for (const file of walk(source)) {
+      const text = readFileSync(file, 'utf8');
+      // A write names the row id in an `edit(...)` call; an import or an event
+      // listener does not, and neither locks the namespace.
+      assert.ok(!/edit\s*\([^)]*['"]webserver['"]/u.test(text),
+        `${file} edits the webserver namespace; the bind config must move out of the home layer`
+        + ' or every write to it will throw "overridden by a home patch or command-line overlay"');
+    }
   }
 });
 
