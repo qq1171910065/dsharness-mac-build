@@ -55,21 +55,49 @@ function git(...args) {
 const normalize = (text) => text.replace(/\r\n/gu, '\n');
 const workflow = normalize(readFileSync(source, 'utf8'));
 
-let existing = '';
+/**
+ * Read a file out of the remote branch without `git show`.
+ *
+ * `git show` output is a blob followed by no delimiter, so any `.trim()` applied
+ * to make it comparable also strips the file's own trailing newline -- which made
+ * this comparison report drift for byte-identical files. Hashing the blob avoids
+ * the question entirely: `hash-object` on the normalized bytes gives the blob id
+ * that the published file must have.
+ * @param {string} spec Git revision and path, such as `ghbuild/main:path/to/file`.
+ * @returns {string} The normalized file content, or an empty string when absent.
+ */
+function readRemote(spec) {
+  const raw = execFileSync('git', ['show', spec], { cwd: repo, encoding: 'utf8' });
+  return normalize(raw);
+}
+
+/** The blob id git would store for the workflow, newline included. */
+function blobId(text) {
+  // `--stdin` hashes exactly these bytes, so the trailing newline is significant
+  // and no trimming happens anywhere in the comparison.
+  return execFileSync('git', ['hash-object', '-t', 'blob', '--stdin'], {
+    cwd: repo,
+    encoding: 'utf8',
+    input: text,
+  }).trim();
+}
+
+const wanted = blobId(workflow);
+let found = '';
 try {
-  existing = normalize(git('show', `${remote}/main:${MIRROR}`));
+  found = blobId(readRemote(`${remote}/main:${MIRROR}`));
 }
 catch {
   // Absent in the remote: the first publication, not an error.
-  existing = '';
+  found = '';
 }
 
-if (existing === workflow) {
-  process.stdout.write(`[publish-macos-workflow] ${remote}/main already matches platform/macos/workflow.yml\n`);
+if (found === wanted) {
+  process.stdout.write(`[publish-macos-workflow] ${remote}/main already matches platform/macos/workflow.yml (blob ${wanted.slice(0, 10)})\n`);
   process.exit(0);
 }
 if (checkOnly) {
-  process.stderr.write(`[publish-macos-workflow] ${remote}/main:${MIRROR} differs from platform/macos/workflow.yml\n`);
+  process.stderr.write(`[publish-macos-workflow] ${remote}/main:${MIRROR} differs from platform/macos/workflow.yml; re-run without --check\n`);
   process.exit(1);
 }
 

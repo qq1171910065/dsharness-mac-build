@@ -18,6 +18,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -287,6 +288,22 @@ test('package-macos: the workflow runs the whole chain the entry point expects',
   assert.ok(brewIndex >= 0, 'coreutils must be installed by the workflow');
   assert.ok(identityIndex >= 0, 'the signing identity step must run the script');
   assert.ok(brewIndex < identityIndex, 'coreutils must install in its own earlier step');
+});
+
+test('package-macos: the mirror comparison cannot pass vacuously', () => {
+  // The mirror check compares git blob ids rather than `git show` output, because
+  // `.trim()` on that output strips the file's own trailing newline and reports
+  // drift for byte-identical files (measured). A comparison that ignores the
+  // trailing newline would also accept a file that lost it -- which the repo
+  // rejects -- so the blob id must be newline-sensitive.
+  const publish = readFileSync(join(here, 'publish-macos-workflow.mjs'), 'utf8');
+  assert.match(publish, /hash-object/u, 'the comparison must hash file contents');
+  assert.doesNotMatch(publish, /normalize\(git\(/u, 'it must not trim `git show` output for comparison');
+  const blobId = (text) => execFileSync('git', ['hash-object', '-t', 'blob', '--stdin'], {
+    cwd: join(here, '..'), encoding: 'utf8', input: text,
+  }).trim();
+  assert.notEqual(blobId('a\n'), blobId('a'), 'a trailing newline must change the blob id');
+  assert.equal(blobId('a\n'), blobId('a\n'), 'identical bytes must hash equally');
 });
 
 test('package-macos: --check validates the configuration instead of only printing a plan', () => {
