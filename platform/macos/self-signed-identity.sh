@@ -1,30 +1,40 @@
 #!/bin/bash
 # Create a throwaway self-signed code-signing identity.
 #
-# ## This does NOT unblock macOS packaging
+# ## This does NOT unblock macOS packaging, and on a headless runner it cannot
 #
 # It was written to get past the unconditional signing in
-# `apps/desktop/scripts/prepare-dsh.ts:156`, and it does not, because the build
-# verifies what it signed (`macos-runtime.ts:57`) against three fields
-# (`verify-macos-signature.mjs:16,17,33`):
+# `apps/desktop/scripts/prepare-dsh.ts:156`. Two independent walls stop it, both
+# confirmed by running it on a GitHub macOS runner:
 #
-#   Authority=Developer ID Application: <name>   satisfiable by setting the CN
-#   TeamIdentifier=<id>                          needs an Apple-issued certificate
-#   Timestamp=<secure timestamp>                 needs Apple's timestamp authority
+# 1. **A self-signed certificate is never a usable identity here.** macOS exposes
+#    a certificate as a code-signing identity only if it trusts it. A self-signed
+#    certificate is its own root, and granting that trust needs
+#    `security add-trusted-cert`, which blocks on an authorization prompt that
+#    nobody can answer on a headless runner (measured: it hit a 120-second
+#    timeout). Without trust, `security find-identity -v -p codesigning` reports
+#    "0 valid identities found" and `codesign` fails with "The specified item
+#    could not be found in the keychain" -- after `security import` printed
+#    success. A real Developer ID chains to Apple's CA and needs none of this.
 #
-# The last two cannot be produced locally: a self-signed issuer cannot assign a
-# team, and Apple's TSA only countersigns genuine Developer ID signatures.
+# 2. **A secure timestamp is unobtainable.** Even past (1), the build verifies
+#    every native file and requires `Authority=Developer ID Application: <name>`,
+#    `TeamIdentifier=<id>`, and `Timestamp=<secure timestamp>`
+#    (`verify-macos-signature.mjs:16,17,33`). The timestamp is countersigned by
+#    Apple's timestamp authority, which only signs genuine Developer ID
+#    signatures; a self-signed request is neither granted nor quickly refused.
+#
 # A real `Developer ID Application` certificate is the only way through.
 #
 # What it is still good for: producing the keychain-shaped environment
 # (`CSC_LINK` p12 + password) that upstream's `withMacOSSigningKeychain`
-# consumes, for inspecting how far preparation gets before verification rejects
-# the signature.
+# consumes, and reporting precisely where a certificate stops being usable.
 #
 # Environment:
-#   DSH_MACOS_SIGNING_NAME  common name to generate (default: DSH Local Signing)
-#   DSH_MACOS_CSC_LINK      output path for the p12 that becomes CSC_LINK
-#   DSH_MACOS_CSC_PASSWORD  password for that p12
+#   DSH_MACOS_SIGNING_NAME          common name to generate (default: DSH Local Signing)
+#   DSH_MACOS_CSC_LINK              output path for the p12 that becomes CSC_LINK
+#   DSH_MACOS_CSC_PASSWORD          password for that p12
+#   DSH_MACOS_SIGN_TIMEOUT_SECONDS  bound for each blocking Apple command (default: 120)
 #
 # Writes `csc_link`, `csc_password`, `identity` to $GITHUB_OUTPUT.
 
@@ -55,16 +65,16 @@ run_bounded() {
     echo "self-signed-identity: no timeout/gtimeout available; cannot bound $1" >&2
     return 1
   fi
-  if "$bounded" -s KILL "$timeout_seconds" "$@"; then
-    return 0
-  fi
+  # Capture the status immediately: `timeout` reports 137 for SIGKILL, and reading
+  # `$?` after any other command would report that command's status instead.
+  "$bounded" -s KILL "$timeout_seconds" "$@" && return 0
   status=$?
   if [ "$status" -eq 137 ]; then
-    echo "self-signed-identity: $1 timed out after ${timeout_seconds}s" >&2
+    echo "self-signed-identity: $1 timed out after ${timeout_seconds}s (blocked on an authorization prompt or a network call)" >&2
   else
     echo "self-signed-identity: $1 failed with status ${status}" >&2
   fi
-  return "$status"
+  return 1
 }
 
 # `codesign` matches the full `Developer ID Application: <name>` string, and that
