@@ -108,12 +108,40 @@ security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password"
 security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
 cp /usr/bin/true "$work/probe"
-# A timestamp request to Apple's TSA can stall indefinitely for a certificate
-# Apple never issued. Bound every Apple-touching command so this step fails fast
-# instead of occupying the job, and so a hang is distinguishable from a reject.
-# `timeout` cannot run `security` here (it needs the keychain unlocked in-process),
-# so only the network-bound signing call is bounded.
+# Every Apple-touching command below is bounded so this step fails fast instead of
+# occupying the job, and so a hang is distinguishable from a rejection.
+#
+# SIGKILL cannot be ignored: `codesign --timestamp` blocks in a network request to
+# Apple's TSA, and a plain background `sleep`+`kill -TERM` watchdog does NOT
+# return from `wait` because codesign does not handle SIGTERM (measured: the step
+# ran 20 minutes with a 120-second watchdog). `timeout -s KILL` reaps it.
 timeout_seconds="${DSH_MACOS_SIGN_TIMEOUT_SECONDS:-120}"
+# `timeout` is GNU coreutils, which GitHub's macOS images do not install by
+# default (there it lives under gtimeout, or not at all). Resolve it explicitly so
+# the failure names the missing tool instead of reporting codesign as broken.
+if command -v timeout >/dev/null 2>&1; then
+  bounded='timeout'
+elif command -v gtimeout >/dev/null 2>&1; then
+  bounded='gtimeout'
+else
+  bounded=''
+fi
+run_bounded() {
+  if [ -z "$bounded" ]; then
+    echo "self-signed-identity: no timeout/gtimeout available; cannot bound $1" >&2
+    return 1
+  fi
+  if "$bounded" -s KILL "$timeout_seconds" "$@"; then
+    return 0
+  fi
+  status=$?
+  if [ "$status" -eq 137 ]; then
+    echo "self-signed-identity: $1 timed out after ${timeout_seconds}s" >&2
+  else
+    echo "self-signed-identity: $1 failed with status ${status}" >&2
+  fi
+  return "$status"
+}
 # Assert the identity is actually registered before signing with it. This is the
 # check whose absence cost several runs: `security import` reporting success and
 # an identity existing are different facts.
@@ -134,22 +162,9 @@ report() {
 }
 trap 'report "$BASH_COMMAND" || true' ERR
 
-codesign --force --sign "$common_name" --keychain "$keychain" \
-  --timestamp --options runtime "$work/probe" &
-sign_pid=$!
-( sleep "$timeout_seconds"; kill -TERM "$sign_pid" 2>/dev/null ) &
-watchdog=$!
-if wait "$sign_pid"; then
-  kill "$watchdog" 2>/dev/null
-else
-  status=$?
-  kill "$watchdog" 2>/dev/null
-  echo "self-signed-identity: codesign --timestamp failed after ${timeout_seconds}s (status ${status})" >&2
-  echo "  Apple's timestamp authority does not countersign a certificate it did not issue;" >&2
-  echo "  the build requires a secure timestamp, so an Apple-issued Developer ID is mandatory." >&2
-  exit 1
-fi
-codesign --verify --strict "$work/probe"
+run_bounded codesign --force --sign "$common_name" --keychain "$keychain" \
+  --timestamp --options runtime "$work/probe"
+run_bounded codesign --verify --strict "$work/probe"
 # The signature must actually carry the CN the build will verify against, so the
 # probe is inspected rather than trusted.
 codesign --display --verbose=4 "$work/probe" 2>&1 | grep -F "Authority=${common_name}" >/dev/null

@@ -95,13 +95,17 @@ jobs:
         # platform/macos/self-signed-identity.sh.
         #
         # The paths are written into .env.macos rather than exported, because
-        # `loadDesktopPackageEnvironment` drops ambient `CSC_*`
+        # `loadPackageEnvironment` drops ambient `CSC_*`
         # (`desktop-package-environment.mjs:19,57`) and reads it from the file.
         id: identity
         env:
           DSH_MACOS_CSC_LINK: ${{ runner.temp }}/dsh-local-signing.p12
           DSH_MACOS_CSC_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          # GNU coreutils provides `timeout`, which bounds the Apple timestamp
+          # request. Without it that request blocks until the job times out
+          # (measured: 20+ minutes with a SIGTERM watchdog that codesign ignored).
+          brew install coreutils || echo "::warning::coreutils unavailable; the signing step will refuse to run unbounded"
           if ! bash platform/macos/self-signed-identity.sh; then
             # Fail here, loudly. A previous revision warned and continued, which
             # appended an empty `CSC_LINK=` to .env.macos and turned this into a
