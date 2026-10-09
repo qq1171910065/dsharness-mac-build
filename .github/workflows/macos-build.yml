@@ -1,0 +1,177 @@
+name: macOS build
+
+# SOURCE OF TRUTH for the macOS packaging workflow. It lives under `platform/`
+# because every fork-owned change must (`platform/verify-fork-update.mjs` checks
+# `owned changes live under platform/`), while GitHub Actions reads workflows only
+# from `.github/workflows/`. `platform/publish-macos-workflow.mjs` mirrors this
+# file into `.github/workflows/macos-build.yml` in the publication repository,
+# which holds this fork's `client/` tree and nothing from upstream. Edit this file,
+# never the mirror; `--check` reports drift.
+#
+# Builds the DSH Desktop macOS application on a GitHub-hosted Apple Silicon
+# runner. A macOS application can only be packaged on macOS
+# (`apps/desktop/scripts/package-target.ts:182`), and this repository has no Mac,
+# so the runner is the build machine.
+#
+# A macOS artifact cannot be produced without an Apple-issued Developer ID
+# certificate: see `client/platform/package-macos.mjs` for the requirement and
+# `client/platform/macos/self-signed-identity.sh` for why a self-signed one is not
+# a substitute. The workflow stops early with a clear error instead of building
+# for twenty minutes first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Target architecture
+        type: choice
+        options: [arm64, x64]
+        default: arm64
+      version:
+        description: Build version recorded in the artifact name
+        type: string
+        default: 0.2.1-alpha.1.20261009.2
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    name: Package macOS ${{ inputs.arch }}
+    # macos-14 and later are Apple Silicon; the free plan only offers macOS
+    # runners to public repositories, which is why this one is public.
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the client fork
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        # The version comes from the repository's packageManager field; pinning
+        # it here as well would let the two drift.
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The workspace requires node ^22.19 || >=24.
+          node-version: 24
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Write the macOS release settings
+        # `desktop-package-environment.mjs:30` reads this file and throws without
+        # it, and its allowlist rejects anything that is not a platform setting,
+        # so the file must exist even though this build signs nothing. The
+        # update and policy origins are required by the configuration's own
+        # environment resolution (`electron-builder-config.mjs:54`).
+        run: |
+          cat > apps/desktop/.env.macos <<'EOF'
+          DSH_DESKTOP_APP_ID=com.czmanong.dsharness
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com
+          DSH_DESKTOP_MACOS_PACK_CONCURRENCY=4
+          DOWNLOAD_TEST_ORIGIN=https://www.czmanong.com
+          DOWNLOAD_TEST_RELEASE_ID=0123456789abcdef0123456789abcdef
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://www.czmanong.com
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://www.czmanong.com"]}
+          EOF
+
+      - name: Check the packaging configuration resolves
+        # Fails here rather than minutes into the build if a required release
+        # setting is missing; the release environment resolves its settings one
+        # at a time, so without this each run would reveal only the next one.
+        run: node platform/check-macos-config.mjs
+
+      - name: Run the platform tests
+        run: node --test platform/package-macos.test.mjs
+
+      - name: Print the packaging plan
+        run: node platform/package-macos.mjs --${{ inputs.arch }} --check
+
+      - name: Install GNU coreutils
+        # Supplies `timeout`, which bounds the Apple timestamp request. It runs in
+        # its own step because `brew install` takes minutes: inside the signing
+        # step it was indistinguishable from a hang there (measured: the step sat
+        # at 20+ minutes twice with the installer as the only explanation left).
+        timeout-minutes: 10
+        run: brew install coreutils
+
+      - name: Create a throwaway signing identity
+        # Preparation signs the runtime on every macOS build regardless of
+        # whether the application is signed (`prepare-dsh.ts:156`). This step
+        # supplies the keychain-shaped environment it needs, but a self-signed
+        # certificate CANNOT satisfy the verification that follows: the build
+        # requires `TeamIdentifier` and a secure `Timestamp`
+        # (`verify-macos-signature.mjs:17,33`), and neither can be produced
+        # without an Apple-issued Developer ID. A real certificate is the only
+        # way through; this step narrows where the build stops. See
+        # platform/macos/self-signed-identity.sh.
+        #
+        # The paths are written into .env.macos rather than exported, because
+        # `loadPackageEnvironment` drops ambient `CSC_*`
+        # (`desktop-package-environment.mjs:19,57`) and reads it from the file.
+        id: identity
+        env:
+          DSH_MACOS_CSC_LINK: ${{ runner.temp }}/dsh-local-signing.p12
+          DSH_MACOS_CSC_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if ! bash platform/macos/self-signed-identity.sh; then
+            # Fail here, loudly. A previous revision warned and continued, which
+            # appended an empty `CSC_LINK=` to .env.macos and turned this into a
+            # confusing "CSC_LINK is required" error two steps later, with the
+            # actual cause already scrolled away.
+            echo "::error::could not create a signing identity; see the output above"
+            exit 1
+          fi
+          {
+            echo "CSC_LINK=${{ steps.identity.outputs.csc_link }}"
+            echo "CSC_KEY_PASSWORD=${{ steps.identity.outputs.csc_password }}"
+            echo "DSH_DESKTOP_MACOS_SIGNING_IDENTITY=${{ steps.identity.outputs.identity }}"
+            echo "DSH_DESKTOP_MACOS_TEAM_ID=0000000000"
+          } >> apps/desktop/.env.macos
+          echo "--- .env.macos keys ---"
+          cut -d= -f1 apps/desktop/.env.macos
+
+      - name: Package the application
+        env:
+          # The Electron download otherwise goes to GitHub and can stall.
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+        run: node platform/package-macos.mjs --${{ inputs.arch }}
+
+      - name: Report what was produced
+        # Everything is discovered rather than assumed: the nesting depth of
+        # electron-builder's output directory is not part of its documented
+        # interface, and a wrong path here would report "no .app" for a build
+        # that actually succeeded.
+        run: |
+          root="apps/desktop/.desktop-build/targets/mac-${{ inputs.arch }}/unsigned-artifacts"
+          echo "artifacts root: $root"
+          find "$root" -maxdepth 3 -print 2>/dev/null | head -60 || true
+          echo "--- disk images and archives ---"
+          find "$root" -maxdepth 3 \( -name '*.dmg' -o -name '*.zip' \) -exec du -h {} \; 2>/dev/null || true
+          echo "--- signing state (expected: not signed) ---"
+          app="$(find "$root" -maxdepth 3 -name '*.app' -type d -print -quit 2>/dev/null)"
+          if [ -n "$app" ]; then
+            echo "app: $app"
+            du -sh "$app"
+            codesign -dv "$app" 2>&1 || true
+            echo "--- bundle identity ---"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" || true
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" || true
+            echo "--- embedded runtime present? ---"
+            ls "$app/Contents/Resources" | head -20 || true
+          else
+            echo "no .app produced under $root"
+          fi
+
+      - name: Upload the application
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-macos-${{ inputs.arch }}-unsigned
+          path: apps/desktop/.desktop-build/targets/mac-${{ inputs.arch }}/unsigned-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
