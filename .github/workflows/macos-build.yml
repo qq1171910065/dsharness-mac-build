@@ -90,17 +90,29 @@ jobs:
         run: node platform/package-macos.mjs --${{ inputs.arch }}
 
       - name: Report what was produced
+        # Everything is discovered rather than assumed: the nesting depth of
+        # electron-builder's output directory is not part of its documented
+        # interface, and a wrong path here would report "no .app" for a build
+        # that actually succeeded.
         run: |
           root="apps/desktop/.desktop-build/targets/mac-${{ inputs.arch }}/unsigned-artifacts"
           echo "artifacts root: $root"
-          find "$root" -maxdepth 2 -print 2>/dev/null | head -50 || true
+          find "$root" -maxdepth 3 -print 2>/dev/null | head -60 || true
+          echo "--- disk images and archives ---"
+          find "$root" -maxdepth 3 \( -name '*.dmg' -o -name '*.zip' \) -exec du -h {} \; 2>/dev/null || true
           echo "--- signing state (expected: not signed) ---"
-          app="$root/mac-${{ inputs.arch }}/DeepSeek Harness.app"
-          if [ -d "$app" ]; then
-            codesign -dv "$app" 2>&1 || true
+          app="$(find "$root" -maxdepth 3 -name '*.app' -type d -print -quit 2>/dev/null)"
+          if [ -n "$app" ]; then
+            echo "app: $app"
             du -sh "$app"
+            codesign -dv "$app" 2>&1 || true
+            echo "--- bundle identity ---"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" || true
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" || true
+            echo "--- embedded runtime present? ---"
+            ls "$app/Contents/Resources" | head -20 || true
           else
-            echo "no .app at $app"
+            echo "no .app produced under $root"
           fi
 
       - name: Upload the application
