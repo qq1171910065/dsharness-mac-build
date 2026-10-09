@@ -64,19 +64,29 @@ fi
 
 # Prove the identity is usable before a twenty-minute build depends on it. This
 # mirrors what `withMacOSSigningKeychain` does with its probe
-# (`macos-signing-keychain.mjs:70-73`), minus the Apple timestamp request, which
-# a self-signed certificate cannot obtain.
+# (`macos-signing-keychain.mjs:60-73`), and the order below is load-bearing:
+# `create` -> `unlock` -> `import` -> `set-key-partition-list` -> search list.
+# Skipping the partition list makes `codesign` report "The specified item could
+# not be found in the keychain" even though `security import` said the identity
+# was imported, because the private key stays inaccessible to the tool.
 keychain="$work/check.keychain-db"
 keychain_password="$(openssl rand -base64 32)"
 security create-keychain -p "$keychain_password" "$keychain"
+security set-keychain-settings "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
-security import "$link" -k "$keychain" -P "$password" -T /usr/bin/codesign
+security import "$link" -k "$keychain" -P "$password" \
+  -T /usr/bin/codesign -T /usr/bin/productbuild
 security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+# `codesign` resolves an identity only from a keychain that is also on the search
+# list, and `--keychain` alone is not enough for that reason.
 security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
 cp /usr/bin/true "$work/probe"
 codesign --force --sign "$common_name" --keychain "$keychain" --timestamp=none "$work/probe"
 codesign --verify --strict "$work/probe"
+# The signature must actually carry the CN the build will verify against, so the
+# probe is inspected rather than trusted.
+codesign --display --verbose=4 "$work/probe" 2>&1 | grep -F "Authority=${common_name}" >/dev/null
 
 {
   echo "csc_link=$link"

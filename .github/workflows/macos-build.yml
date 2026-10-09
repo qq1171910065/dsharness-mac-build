@@ -98,14 +98,17 @@ jobs:
         # `loadDesktopPackageEnvironment` drops ambient `CSC_*`
         # (`desktop-package-environment.mjs:19,57`) and reads it from the file.
         id: identity
-        continue-on-error: true
         env:
           DSH_MACOS_CSC_LINK: ${{ runner.temp }}/dsh-local-signing.p12
           DSH_MACOS_CSC_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           if ! bash platform/macos/self-signed-identity.sh; then
-            echo "::warning::self-signed identity unavailable; macOS packaging cannot pass runtime verification without an Apple-issued Developer ID"
-            exit 0
+            # Fail here, loudly. A previous revision warned and continued, which
+            # appended an empty `CSC_LINK=` to .env.macos and turned this into a
+            # confusing "CSC_LINK is required" error two steps later, with the
+            # actual cause already scrolled away.
+            echo "::error::could not create a signing identity; see the output above"
+            exit 1
           fi
           {
             echo "CSC_LINK=${{ steps.identity.outputs.csc_link }}"
