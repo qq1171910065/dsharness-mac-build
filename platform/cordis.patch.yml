@@ -12,7 +12,7 @@
 # upstream package rename cannot turn this deployment back into "login talks to
 # DeepSeek". The row is identified by id alone.
 
-# A fixed port and an optional all-interfaces bind, for external integrations.
+# A fixed port and an all-interfaces bind, for external integrations.
 #
 # Why this row exists: the Desktop Host launches the Web application with a
 # hard-coded `--port 0` (`apps/desktop-host/src/index.ts:30`), so every launch
@@ -20,27 +20,35 @@
 # one address therefore goes stale on the next restart and reports "service
 # unreachable" -- which is exactly what the sixai integration hit (its
 # dsh_instance rows still carried :3080 and :43127 from the previous shell).
+# A loopback-only bind is unreachable from another machine in principle, so the
+# port being unstable was only half the defect.
 #
 # The web-app bundle already declares this row, and since a patch replaces the
 # targeted row's whole config, the expressions below are the upstream ones with
-# the two environment fallbacks swapped in ahead of the literals. `webStartup`
-# still wins when an invocation passes --host/--port explicitly, so `dsh web`
-# keeps its own flags; the Desktop Host passes only `--no-open --port 0`, and
-# `--port 0` means "pick any free port" -- see DSH_GATEWAY_PORT below for why
-# that is replaced rather than honoured.
+# the deployment defaults substituted ahead of the literals. Both defaults --
+# `0.0.0.0` and `3080` -- are what make an installed client answer on a stable,
+# reachable address with NO configuration: the deployment targets are machines
+# whose operators cannot set environment variables.
 #
-# ⚠️ DSH_GATEWAY_HOST=0.0.0.0 exposes the full Harness API -- and therefore shell
+# Precedence, highest first:
+#   1. `DSH_GATEWAY_HOST` / `DSH_GATEWAY_PORT`   (deployment override)
+#   2. `ctx.webStartup.host` / `.port`           (explicit --host/--port)
+#   3. `0.0.0.0` / `3080`                        (these defaults)
+# `dsh web --port 13096` therefore still wins over 3080, and only the Desktop
+# Host's `--port 0` reaches step 3: `0` is the "pick any free port" sentinel, not
+# an answer worth honouring, which is why `||` is used rather than `??` there.
+#
+# ⚠️ Binding all interfaces exposes the full Harness API -- and therefore shell
 # execution -- to everyone who can reach the machine. Upstream refuses that bind
 # from the command line for this reason (apps/cli/src: "would expose remote code
-# execution to the network"). It is opt-in here, never a default, and the shared
-# secret is still required for every request.
+# execution to the network"). This layer makes it the shipped default anyway,
+# because a client that only binds loopback cannot serve the integrations it
+# exists to serve. The shared secret remains mandatory for every request
+# (`DSH_AUTH_TOKEN`, written into the deployment layer by platform/install.mjs),
+# and the installer prints a warning with the security terms.
 - id: webserver
   config:
-    host: !!js process.env.DSH_GATEWAY_HOST ?? ctx.webStartup.host ?? '127.0.0.1'
-    # DSH_GATEWAY_PORT pins the port an external integration stores. The upstream
-    # fallback is `ctx.webStartup.port ?? 3080`, and the Desktop Host always
-    # supplies 0, so `|| ` is used rather than `??` on purpose: 0 is the "any
-    # free port" sentinel, not an answer worth keeping when a pin is configured.
+    host: !!js process.env.DSH_GATEWAY_HOST ?? ctx.webStartup.host ?? '0.0.0.0'
     port: !!js Number(process.env.DSH_GATEWAY_PORT ?? (ctx.webStartup.port || 3080))
     compression: gzip
     compressionLevel: 1

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installInto, mergeManagedBlock, removeFrom, resolveDshHome } from './install.mjs';
+import { DEFAULT_GATEWAY_HOST, DEFAULT_GATEWAY_PORT, installInto, mergeManagedBlock, removeFrom, resolveDshHome } from './install.mjs';
 import { MARKETPLACE_PACKAGE, PROFILE_PLUGINS } from './provision.mjs';
 
 /**
@@ -257,6 +257,53 @@ test('no client settings page edits the webserver namespace', () => {
         + ' or every write to it will throw "overridden by a home patch or command-line overlay"');
     }
   }
+});
+
+/**
+ * An installed client must answer on a stable address that another machine can
+ * actually reach, with no configuration: the operators of the target machines
+ * cannot set environment variables, and a loopback-only bind is unreachable from
+ * another machine **in principle**, so `--port 0` was only half the defect that
+ * produced 「服务不可达」.
+ *
+ * The shipped default is therefore `0.0.0.0:3080`. Two properties are asserted
+ * separately, because they fail differently:
+ *
+ *  - **The patch layer defaults are reachable ones.** A regression to
+ *    `'127.0.0.1'` or to a `ctx.webStartup.port ??` that keeps the Host's `0`
+ *    sentinel would silently restore the original bug, and only a real
+ *    second-machine call would notice. This catches it in-process.
+ *  - **`install.mjs` agrees with that file.** It prints the resolved address the
+ *    operator copies into an external integration, so a drift would make the
+ *    printed address *wrong* rather than merely unset — the worst outcome, since
+ *    it is quoted back as authority. Both names come from the same module the
+ *    installer uses, so the assertion tracks the real constants.
+ */
+test('the shipped gateway defaults are LAN-reachable and match the installer report', () => {
+  const text = readFileSync(join(here, 'cordis.patch.yml'), 'utf8');
+  const row = [...text.matchAll(/^- id: webserver\n((?:.*\n)*?)(?=\n- id: |\n#|$)/gmu)][0];
+  assert.ok(row !== undefined, 'the webserver row must exist: it owns the bind host and port');
+  const config = row[1];
+
+  const hostDefault = /^\s*host:.*?\?\?\s*'([^']+)'\s*$/mu.exec(config)?.[1];
+  assert.equal(hostDefault, DEFAULT_GATEWAY_HOST,
+    'the patch layer must default to the same all-interfaces host the installer reports;'
+    + ' loopback here makes every external integration unreachable however correct its address');
+
+  /*
+   * The port expression must keep the `||` guard. With `??`, the Host's `--port 0`
+   * (its own hard-coded launch flag) would win and the port would be OS-assigned
+   * again, which is the restart-to-restart drift an external caller cannot follow.
+   */
+  assert.match(config, /^\s*port:.*ctx\.webStartup\.port \|\| \d+/mu,
+    'the port fallback must use `||`, not `??`: the Desktop Host always passes --port 0');
+  const portDefault = /ctx\.webStartup\.port \|\| (\d+)/u.exec(config)?.[1];
+  assert.equal(portDefault, DEFAULT_GATEWAY_PORT,
+    'the patch layer must default to the same port the installer reports');
+
+  // Both defaults must also stay overridable, or a deployment that *can* set them loses the escape hatch.
+  assert.match(config, /DSH_GATEWAY_HOST/u, 'the host must stay environment-overridable');
+  assert.match(config, /DSH_GATEWAY_PORT/u, 'the port must stay environment-overridable');
 });
 
 test('installInto: writes the rows and provisions the profile plugins', () => {

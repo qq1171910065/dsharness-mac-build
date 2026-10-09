@@ -410,38 +410,47 @@ The gateway component of `dsharness.mjs` adds a second credential that lands in 
 | browser on the LAN | `/dsharness/auth` exchanges the secret for a cookie, then `/` and `/api` both work |
 | secret unset | one is generated and stored on first run, so the channel works and can be read off `/dsharness/gateway` |
 
-### A fixed port and an off-machine bind (`DSH_GATEWAY_PORT` / `DSH_GATEWAY_HOST`)
+### A stable, reachable bind (`DSH_GATEWAY_PORT` / `DSH_GATEWAY_HOST`)
 
-An external integration stores one address and calls it. By default it cannot: the Desktop Host
-launches the Web application with a hard-coded `--port 0` (`apps/desktop-host/src/index.ts:30`),
-so every restart binds a different OS-assigned loopback port. Measured on this machine: `19387`
-now, `58733` in an earlier session — and the integration that had stored `:3080` reported
-"service unreachable" while the process was healthy and listening.
+An external integration stores one address and calls it. The original defect had **two** halves, and
+fixing only one of them left the integration still reporting "service unreachable":
 
-The `webserver` row in `cordis.patch.yml` therefore reads both values from the environment. It is
-not a new plugin: `packages/bundle/web-app/cordis.patch.yml:178` already declares that row, and a
-patch replaces the targeted row's whole config, so these are the upstream expressions with two
-fallbacks inserted ahead of the literals.
+1. The Desktop Host launches the Web application with a hard-coded `--port 0`
+   (`apps/desktop-host/src/index.ts:30`), so every restart binds a different OS-assigned port.
+   Measured on this machine: `19387` now, `58733` in an earlier session, while the integration that
+   had stored `:3080` reported "service unreachable" against a healthy listener.
+2. The bind was **loopback-only**, and a loopback port is unreachable from another machine *in
+   principle* — so even a correct, stable address could not work. This is the half that survives
+   pinning the port, and the reason the shipped default is now `0.0.0.0:3080`.
 
-| variable | effect |
-|----------|--------|
-| `DSH_GATEWAY_PORT` | pins the port, so a stored address survives restarts |
-| `DSH_GATEWAY_HOST` | `0.0.0.0` binds every interface instead of loopback |
+The `webserver` row in `cordis.patch.yml` carries both defaults and both overrides. It is not a new
+plugin: `packages/bundle/web-app/cordis.patch.yml:178` already declares that row, and a patch
+replaces the targeted row's whole config, so these are the upstream expressions with the deployment
+values substituted ahead of the literals.
+
+| value | shipped default | override |
+|-------|-----------------|----------|
+| host | `0.0.0.0` (every interface) | `DSH_GATEWAY_HOST` |
+| port | `3080` | `DSH_GATEWAY_PORT` |
 
 ```powershell
-$env:DSH_GATEWAY_HOST='0.0.0.0'; $env:DSH_GATEWAY_PORT='3080'
-node platform/install.mjs          # prints the resolved address, and warns on 0.0.0.0
+node platform/install.mjs                          # prints "host 0.0.0.0, port 3080 (defaults; …)"
 node apps/cli/lib/bin.js web --no-open --port 0    # → LAN: http://10.32.250.50:3080/…
 ```
 
+**No configuration is required, and that is the point**: the machines this deployment targets have
+operators who cannot set environment variables, so a default that needed `$env:` would not be a
+default. Precedence, highest first — `DSH_GATEWAY_HOST`/`DSH_GATEWAY_PORT`, then an explicit
+`--host`/`--port`, then these defaults.
+
 Two deliberate details:
 
-- **`webStartup` still wins.** `dsh web --host/--port` keeps its own flags; only an explicit
-  deployment variable overrides them.
+- **`webStartup` still wins over the defaults.** `dsh web --port 13096` keeps its own flag; only a
+  deployment variable overrides it. Verified: `DSH_GATEWAY_PORT=13097` with the command line still
+  `--port 0` came up on `0.0.0.0:13097` and advertised the LAN address.
 - **`port` uses `||`, not `??`.** The Desktop Host always passes `--port 0`, and `0` means "pick any
-  free port" — a sentinel, not an answer — so a configured pin has to replace it rather than be
-  shadowed by it. Verified: with `DSH_GATEWAY_PORT=13096` and the command line still `--port 0`,
-  the listener came up on `0.0.0.0:13096`.
+  free port" — a sentinel, not an answer — so the default has to replace it rather than be shadowed
+  by it.
 
 Upstream refuses this bind **from the command line** — `--host 0.0.0.0` exits with
 `it would expose remote code execution to the network` (asserted in `apps/cli/tests/built-bin.e2e.ts`).
@@ -452,10 +461,12 @@ adds them to the trusted set when the bind is `0.0.0.0`. Config is the seam for 
 has decided to take that risk.
 
 ⚠️ **What `0.0.0.0` means.** Every caller who can reach the machine can reach the full Harness API,
-including shell execution. The command-line gate exists for that reason, and the deployment layer
-chooses to bypass it deliberately rather than by accident — which is why `install.mjs` prints the
-resolved address and, when the bind is `0.0.0.0`, a warning. Use it on a trusted network with a
-strong shared secret, and leave `DSH_GATEWAY_HOST` unset to stay loopback-only.
+including shell execution. The command-line gate exists for that reason, and this layer bypasses it
+deliberately rather than by accident — which is why `install.mjs` prints the resolved address and a
+warning naming the terms. The shared secret (`DSH_AUTH_TOKEN`, written into the deployment layer at
+install time) remains **mandatory for every request**: the wider bind is what makes the client
+usable, and the secret is what guards it. Set `DSH_GATEWAY_HOST=127.0.0.1` to restrict a machine to
+loopback again.
 
 ⚠️ **This row is exempt from the "no `config:` for a page-writable namespace" rule**, and
 `install.test.mjs` states why in executable form: no `ui-settings*` package edits this namespace

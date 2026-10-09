@@ -82,6 +82,20 @@ import { describeReports, provisionAll, unprovisionProfile } from './provision.m
 const BEGIN = '# >>> dsharness platform rows (managed by platform/install.mjs)';
 const END = '# <<< dsharness platform rows';
 
+/**
+ * The bind and port an installed client uses when the operator sets neither
+ * `DSH_GATEWAY_HOST` nor `DSH_GATEWAY_PORT`. They must match the fallbacks in
+ * `platform/cordis.patch.yml`; `install.test.mjs` asserts the two agree, because
+ * a drift here would make the reported address wrong rather than absent.
+ *
+ * All interfaces rather than loopback: a loopback-only bind cannot be reached
+ * from another machine, so an external integration could never work without
+ * per-machine environment variables -- and the target machines' operators cannot
+ * set them. The shared secret is what guards the wider bind.
+ */
+export const DEFAULT_GATEWAY_HOST = '0.0.0.0';
+export const DEFAULT_GATEWAY_PORT = '3080';
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 export { resolveDshHome };
@@ -218,20 +232,24 @@ function main() {
    * The Desktop Host always launches with `--port 0`, so without these two the
    * port changes on every restart and a caller that stored one address reports
    * "service unreachable" (measured: sixai's dsh_instance rows still held :3080
-   * and :43127 from the previous shell). Printing the resolved values is what
+   * and :43127 from the previous shell). A loopback-only bind is unreachable
+   * from another machine in principle, so the shipped defaults are now
+   * `0.0.0.0` and `3080`: an installed client answers on a stable, reachable
+   * address with no configuration at all. Printing the resolved values is what
    * lets an operator copy the right address instead of guessing.
    */
-  const gatewayHost = String(process.env.DSH_GATEWAY_HOST || '').trim();
-  const gatewayPort = String(process.env.DSH_GATEWAY_PORT || '').trim();
+  const gatewayHost = String(process.env.DSH_GATEWAY_HOST || '').trim() || DEFAULT_GATEWAY_HOST;
+  const gatewayPort = String(process.env.DSH_GATEWAY_PORT || '').trim() || DEFAULT_GATEWAY_PORT;
   process.stdout.write(
-    `[platform] external access: host ${gatewayHost === '' ? '127.0.0.1 (loopback only)' : gatewayHost}`
-    + `, port ${gatewayPort === '' ? 'OS-assigned each launch (set DSH_GATEWAY_PORT to pin it)' : gatewayPort}\n`,
+    `[platform] external access: host ${gatewayHost}, port ${gatewayPort}`
+    + `${String(process.env.DSH_GATEWAY_HOST || '').trim() === '' ? ' (defaults; both are environment-overridable)' : ''}\n`,
   );
-  if (gatewayHost === '0.0.0.0') {
+  if (gatewayHost === DEFAULT_GATEWAY_HOST) {
     process.stdout.write(
-      '[platform] ⚠️ DSH_GATEWAY_HOST=0.0.0.0 binds all interfaces: everyone who can reach this machine'
-      + ' can call the full Harness API, including shell execution. Keep the shared secret strong and'
-      + ' treat the network as trusted. Leave it unset to stay loopback-only.\n',
+      `[platform] ⚠️ host ${DEFAULT_GATEWAY_HOST} binds all interfaces: everyone who can reach this machine`
+      + ' can call the full Harness API, including shell execution. The shared secret is required for every'
+      + ' request -- keep it strong and treat the network as trusted. Set DSH_GATEWAY_HOST=127.0.0.1 to'
+      + ' restrict this machine to loopback.\n',
     );
   }
 }
