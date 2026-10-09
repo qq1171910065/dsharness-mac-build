@@ -37,6 +37,36 @@ password="${DSH_MACOS_CSC_PASSWORD:?DSH_MACOS_CSC_PASSWORD must be set}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# Bound every Apple-touching command. SIGKILL cannot be ignored, which matters
+# because the calls below can block on network or GUI authorization with no
+# timeout of their own. Resolve the tool explicitly so a missing one is reported
+# as missing rather than as a signing failure; `timeout` is GNU coreutils, which
+# GitHub's macOS images do not ship by default.
+timeout_seconds="${DSH_MACOS_SIGN_TIMEOUT_SECONDS:-120}"
+if command -v timeout >/dev/null 2>&1; then
+  bounded='timeout'
+elif command -v gtimeout >/dev/null 2>&1; then
+  bounded='gtimeout'
+else
+  bounded=''
+fi
+run_bounded() {
+  if [ -z "$bounded" ]; then
+    echo "self-signed-identity: no timeout/gtimeout available; cannot bound $1" >&2
+    return 1
+  fi
+  if "$bounded" -s KILL "$timeout_seconds" "$@"; then
+    return 0
+  fi
+  status=$?
+  if [ "$status" -eq 137 ]; then
+    echo "self-signed-identity: $1 timed out after ${timeout_seconds}s" >&2
+  else
+    echo "self-signed-identity: $1 failed with status ${status}" >&2
+  fi
+  return "$status"
+}
+
 # `codesign` matches the full `Developer ID Application: <name>` string, and that
 # prefix is what macOS reads as the identity name. Note the split: the certificate
 # carries the prefix, while `DSH_DESKTOP_MACOS_SIGNING_IDENTITY` must NOT
@@ -91,9 +121,9 @@ fi
 #     it the expensive way.
 keychain="$work/check.keychain-db"
 keychain_password="$(openssl rand -base64 32)"
-security create-keychain -p "$keychain_password" "$keychain"
-security set-keychain-settings "$keychain"
-security unlock-keychain -p "$keychain_password" "$keychain"
+run_bounded security create-keychain -p "$keychain_password" "$keychain"
+run_bounded security set-keychain-settings "$keychain"
+run_bounded security unlock-keychain -p "$keychain_password" "$keychain"
 # A self-signed certificate is its own root and macOS does not trust it, so it is
 # never exposed as a code-signing identity: `find-identity -v -p codesigning`
 # reports "0 valid identities found" and `codesign` then says "The specified item
@@ -101,47 +131,16 @@ security unlock-keychain -p "$keychain_password" "$keychain"
 # the certificate carries the Apple code-signing OID. A real Developer ID needs
 # none of this because it chains to Apple's CA. Trust has to be granted to the
 # certificate file before the identity becomes usable.
-security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$work/cert.pem"
-security import "$link" -k "$keychain" -P "$password" \
+#
+# `add-trusted-cert` is bounded because it can block on an authorization prompt,
+# which never resolves on a headless runner.
+run_bounded security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$work/cert.pem"
+run_bounded security import "$link" -k "$keychain" -P "$password" \
   -T /usr/bin/codesign -T /usr/bin/productbuild -A
-security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
-security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+run_bounded security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+run_bounded security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
 cp /usr/bin/true "$work/probe"
-# Every Apple-touching command below is bounded so this step fails fast instead of
-# occupying the job, and so a hang is distinguishable from a rejection.
-#
-# SIGKILL cannot be ignored: `codesign --timestamp` blocks in a network request to
-# Apple's TSA, and a plain background `sleep`+`kill -TERM` watchdog does NOT
-# return from `wait` because codesign does not handle SIGTERM (measured: the step
-# ran 20 minutes with a 120-second watchdog). `timeout -s KILL` reaps it.
-timeout_seconds="${DSH_MACOS_SIGN_TIMEOUT_SECONDS:-120}"
-# `timeout` is GNU coreutils, which GitHub's macOS images do not install by
-# default (there it lives under gtimeout, or not at all). Resolve it explicitly so
-# the failure names the missing tool instead of reporting codesign as broken.
-if command -v timeout >/dev/null 2>&1; then
-  bounded='timeout'
-elif command -v gtimeout >/dev/null 2>&1; then
-  bounded='gtimeout'
-else
-  bounded=''
-fi
-run_bounded() {
-  if [ -z "$bounded" ]; then
-    echo "self-signed-identity: no timeout/gtimeout available; cannot bound $1" >&2
-    return 1
-  fi
-  if "$bounded" -s KILL "$timeout_seconds" "$@"; then
-    return 0
-  fi
-  status=$?
-  if [ "$status" -eq 137 ]; then
-    echo "self-signed-identity: $1 timed out after ${timeout_seconds}s" >&2
-  else
-    echo "self-signed-identity: $1 failed with status ${status}" >&2
-  fi
-  return "$status"
-}
 # Assert the identity is actually registered before signing with it. This is the
 # check whose absence cost several runs: `security import` reporting success and
 # an identity existing are different facts.
